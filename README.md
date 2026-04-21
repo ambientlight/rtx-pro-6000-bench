@@ -214,4 +214,4 @@ PYTORCH_ALLOC_CONF=expandable_segments:True vllm serve /path/to/model --config /
 
 # Disclaimer
 
-> This repo (code, README) was predominantly AI-generated using [cc](https://claude.com/claude-code) with opus-4.6.
+This repo (code, README) was predominantly AI-generated using [cc](https://claude.com/claude-code) with opus-4.6.
