@@ -211,3 +211,7 @@ PYTORCH_ALLOC_CONF=expandable_segments:True vllm serve /path/to/model --config /
 |------|---------|
 | `b.log` | Single-line `bench-sweep` invocation command with all CLI args |
 | `bench_sweep.log` | Full concatenated stdout from all benchmark runs (config dumps, progress, result tables) |
+
+# Disclaimer
+
+> This repo (code, README) was predominantly AI-generated using [cc](https://claude.com/claude-code) with opus-4.6.
