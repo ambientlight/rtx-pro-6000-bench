@@ -683,7 +683,7 @@ def run_benchmark(
     print(f"{'='*70}")
 
     if dry_run:
-        print(f"  [DRY RUN] Would execute:")
+        print("  [DRY RUN] Would execute:")
         print(f"  {' '.join(cmd)}")
         return None
 
@@ -702,7 +702,7 @@ def run_benchmark(
 
     t0 = time.time()
     proc = subprocess.run(cmd)
-    elapsed = time.time() - t0
+    _ = time.time() - t0  # wall-clock elapsed (used for logging if needed)
 
     # Stop telemetry and save
     telem_summary = None
@@ -853,7 +853,7 @@ def run_sweep(args: argparse.Namespace) -> list[BenchResult]:
                     print(f"\n*** SATURATION DETECTED at concurrency {conc} ***")
                     print(f"    Best duration was {best_duration:.1f}s; "
                           f"collected {points_past_best} extra point(s) past best.")
-                    print(f"    Stopping sweep.")
+                    print("    Stopping sweep.")
                     break
 
     return results
@@ -1614,11 +1614,11 @@ def run_matrix_sweep(
 
     conc_map = getattr(args, "max_concurrency_map", None)
 
-    print(f"=== MATRIX SWEEP MODE ===")
+    print("=== MATRIX SWEEP MODE ===")
     print(f"Input lengths:  {input_lens}")
     print(f"Output lengths: {output_lens}")
     if conc_map:
-        print(f"Max concurrency per input length:")
+        print("Max concurrency per input length:")
         for il in input_lens:
             print(f"  {il:>6d} tokens -> max_concurrency={conc_map[il]}")
     else:
@@ -1693,9 +1693,9 @@ def main() -> None:
     else:
         print(f"Concurrency: {args.min_concurrency} -> {args.max_concurrency} (step {args.step_size})")
     if args.reuse:
-        print(f"Reuse:       ON (skip concurrency levels with existing results)")
+        print("Reuse:       ON (skip concurrency levels with existing results)")
     if args.no_early_stop:
-        print(f"Early stop:  DISABLED (sweep all concurrency levels)")
+        print("Early stop:  DISABLED (sweep all concurrency levels)")
     if args.telemetry:
         print(f"Telemetry:   ON (interval {args.telemetry_interval}s)")
     print(f"Result dir:  {args.result_dir}")
@@ -1712,7 +1712,7 @@ def main() -> None:
         # Auto-generate comparison overlay (per-combo plots already done inside run_matrix_sweep)
         if len(all_results) > 1 and not args.no_plot:
             print(f"\n{'='*70}")
-            print(f"  Generating comparison overlay plots...")
+            print("  Generating comparison overlay plots...")
             print(f"{'='*70}")
             series = {
                 f"{il}in/{ol}out": results
@@ -1742,7 +1742,7 @@ def main() -> None:
                     series[label] = res
                     print(f"  {len(res)} data points")
                 else:
-                    print(f"  No valid results found")
+                    print("  No valid results found")
 
         if not series:
             print("\nNo results found for any sweep. Nothing to plot.")
