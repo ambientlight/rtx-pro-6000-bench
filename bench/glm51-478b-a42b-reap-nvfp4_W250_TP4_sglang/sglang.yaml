@@ -1,0 +1,62 @@
+# GLM-5.1-478B-A42B-REAP-NVFP4 on 4x RTX PRO 6000 Blackwell (sm_120)
+# Engine: sglang 0.5.10.post1 (vllm lacks MLA+sparse attention on sm_120)
+# Venv:   ~/.venvs/sglang-cu130/
+#
+# Launch:
+#   export CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES=0,1,2,3
+#   export SGLANG_ENABLE_JIT_DEEPGEMM=0 SGLANG_ENABLE_DEEP_GEMM=0 SGLANG_DISABLE_DEEP_GEMM=1
+#   export SGLANG_SET_CPU_AFFINITY=1 SGLANG_ENABLE_SPEC_V2=True FLASHINFER_DISABLE_VERSION_CHECK=1
+#   export NCCL_IB_DISABLE=1 NCCL_P2P_DISABLE=0 NCCL_P2P_LEVEL=PIX NCCL_SHM_DISABLE=0
+#   export NCCL_BUFFSIZE=4194304 NCCL_MIN_NCHANNELS=8 NCCL_SOCKET_IFNAME=lo GLOO_SOCKET_IFNAME=lo
+#   export NCCL_CUMEM_HOST_ENABLE=0 TORCH_NCCL_BLOCKING_WAIT=1 TORCH_NCCL_ASYNC_ERROR_HANDLING=1
+#   export OMP_NUM_THREADS=8 SAFETENSORS_FAST_GPU=1 NVIDIA_TF32_OVERRIDE=1
+#   ~/.venvs/sglang-cu130/bin/python -m sglang.launch_server --config bench/glm51-478b-a42b-reap-nvfp4_W250_TP4/sglang.yaml
+#
+# Required patch (already applied in ~/.venvs/sglang-cu130):
+#   Remove "GlmMoeDsaForCausalLM" from is_deepseek_nsa() in
+#   sglang/srt/configs/model_config.py to force triton attention on sm_120.
+
+model_path: /mnt/hot/ambientlight/models/glm-51-478b-a42b-reap-nvfp4
+served_model_name: GLM-5.1-478B-A42B-REAP-NVFP4
+host: 0.0.0.0
+port: 8000
+trust_remote_code: true
+
+# Parallelism
+tensor_parallel_size: 4
+pipeline_parallel_size: 1
+
+# Context & scheduling
+context_length: 32768
+max_running_requests: 16
+chunked_prefill_size: 4096
+page_size: 128
+
+# Quantization
+quantization: modelopt_fp4
+kv_cache_dtype: fp8_e4m3
+
+# Memory
+mem_fraction_static: 0.94
+
+# Backends (tuned for sm_120 Blackwell workstation)
+triton_attention_num_kv_splits: 64
+moe_runner_backend: cutlass
+fp4_gemm_backend: flashinfer_cudnn
+
+# CUDA graphs
+cuda_graph_max_bs: 4
+pre_warm_nccl: true
+
+# Metrics (for bench_sweep telemetry)
+enable_metrics: true
+
+# Chat / tool use
+chat_template: /mnt/hot/ambientlight/models/glm-51-478b-a42b-reap-nvfp4/chat_template.jinja
+
+# Model loading
+model_loader_extra_config: '{"enable_multithread_load": true, "num_threads": 16}'
+watchdog_timeout: 1800
+
+# IndexCache: reuse DSA indices across layers (~70% indexer time savings at long ctx)
+json_model_override_args: '{"index_topk_pattern": "FFSFSSSFSSFFFSSSFFFSFSSSSSSFFSFFSFFSSFFFFFFSFFFFFSFFSSSSSSFSFFFSFSSSFSFFSFFSSS"}'

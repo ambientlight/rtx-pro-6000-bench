@@ -170,6 +170,7 @@ class TelemetryCollector:
         self,
         interval_s: float = 0.25,
         base_url: str = "http://127.0.0.1:8000",
+        gpu_ids: list[int] | None = None,
     ) -> None:
         self.interval_s = interval_s
         self.metrics_url = base_url.rstrip("/") + "/metrics"
@@ -178,6 +179,7 @@ class TelemetryCollector:
         self._thread: threading.Thread | None = None
         self._start_time: float = 0.0
         self._gpu_handles: list = []
+        self._gpu_indices: list[int] = []
         self._nvml_available = False
         self._pynvml: Any = None
         self._vllm_metrics_available = True
@@ -187,9 +189,13 @@ class TelemetryCollector:
             import pynvml
             pynvml.nvmlInit()
             count = pynvml.nvmlDeviceGetCount()
-            self._gpu_handles = [pynvml.nvmlDeviceGetHandleByIndex(i) for i in range(count)]
+            indices = gpu_ids if gpu_ids is not None else list(range(count))
+            self._gpu_indices = indices
+            self._gpu_handles = [pynvml.nvmlDeviceGetHandleByIndex(i) for i in indices]
             self._nvml_available = True
             self._pynvml = pynvml
+            if gpu_ids is not None:
+                print(f"  [TELEMETRY] Monitoring GPUs: {gpu_ids}")
         except Exception as e:
             print(f"  [TELEMETRY] pynvml unavailable: {e} — skipping GPU metrics")
 
@@ -388,10 +394,11 @@ class TelemetryCollector:
         if not self._samples:
             return
         num_gpus = len(self._samples[0].gpu_power_w) if self._samples else 0
+        gpu_labels = self._gpu_indices if self._gpu_indices else list(range(num_gpus))
         with open(path, "w", newline="") as f:
             writer = csv.writer(f)
             header = ["timestamp", "elapsed_s"]
-            for g in range(num_gpus):
+            for g in gpu_labels:
                 header += [f"gpu{g}_power_w", f"gpu{g}_mem_used_gb",
                            f"gpu{g}_util_pct", f"gpu{g}_mem_bw_util_pct",
                            f"gpu{g}_temp_c",
@@ -694,6 +701,7 @@ def run_benchmark(
             collector = TelemetryCollector(
                 interval_s=getattr(args, "telemetry_interval", 0.25),
                 base_url=args.base_url,
+                gpu_ids=getattr(args, "gpu_ids", None),
             )
             collector.start()
         except Exception as e:
@@ -1315,10 +1323,9 @@ def plot_telemetry_timeseries(csv_path: str, concurrency: int, args: argparse.Na
     plot_dir = os.path.dirname(csv_path)
     elapsed = [float(s["elapsed_s"]) for s in samples]
 
-    # Detect number of GPUs from CSV headers
-    num_gpus = 0
-    while f"gpu{num_gpus}_power_w" in samples[0]:
-        num_gpus += 1
+    # Detect GPU indices from CSV headers (handles non-sequential like gpu2, gpu3)
+    import re
+    gpu_indices = sorted({int(m.group(1)) for k in samples[0] for m in [re.match(r"gpu(\d+)_power_w", k)] if m})
 
     seq_len_part = f"  |  seq {args.max_seq_len}" if args.max_seq_len is not None else ""
     subtitle = f"{args.model_id}{seq_len_part}  |  {args.input_len}in/{args.output_len}out  |  c={concurrency}  |  W{args.watt}"
@@ -1327,10 +1334,10 @@ def plot_telemetry_timeseries(csv_path: str, concurrency: int, args: argparse.Na
     fig, ax = plt.subplots(figsize=(10, 5))
     total_power = []
     for s in samples:
-        total = sum(float(s.get(f"gpu{g}_power_w") or 0) for g in range(num_gpus))
+        total = sum(float(s.get(f"gpu{g}_power_w") or 0) for g in gpu_indices)
         total_power.append(total)
     ax.plot(elapsed, total_power, "k-", linewidth=2, label="Total")
-    for g in range(num_gpus):
+    for g in gpu_indices:
         vals = [float(s.get(f"gpu{g}_power_w") or 0) for s in samples]
         ax.plot(elapsed, vals, "--", linewidth=1, alpha=0.6, label=f"GPU {g}")
     ax.set_title(f"Power Draw Over Time\n{subtitle}")
@@ -1550,11 +1557,17 @@ def parse_args() -> argparse.Namespace:
                    help="Explicitly disable telemetry (overrides --telemetry)")
     p.add_argument("--telemetry-interval", type=float, default=0.25,
                    help="Telemetry sampling interval in seconds (default: 0.25)")
+    p.add_argument("--gpu-ids", type=str, default=None,
+                   help="Comma-separated GPU indices to monitor for telemetry (e.g. '2,3'). Default: all GPUs.")
 
     args = p.parse_args()
 
     if args.tokenizer is None:
         args.tokenizer = f"/mnt/hot/ambientlight/models/{args.model_id}"
+
+    # Parse --gpu-ids
+    if args.gpu_ids is not None:
+        args.gpu_ids = [int(x.strip()) for x in args.gpu_ids.split(",")]
 
     # Resolve telemetry: --no-telemetry wins over --telemetry
     if args.no_telemetry:

@@ -1,6 +1,6 @@
-# vllm-bench
+# rtx-pro-6000-bench
 
-Benchmark sweep harness for local coding model inference with vLLM on NVIDIA Blackwell GPUs. Sweeps concurrency levels, input/output token lengths, and collects GPU telemetry (power, KV cache, utilization) to produce comparison charts.
+Benchmark sweep harness for local coding model inference on NVIDIA Blackwell GPUs. Supports vLLM and sglang engines. Sweeps concurrency levels, input/output token lengths, and collects GPU telemetry (power, KV cache, utilization) to produce comparison charts.
 
 ## Hardware
 
@@ -15,13 +15,14 @@ Benchmark sweep harness for local coding model inference with vLLM on NVIDIA Bla
 
 ## Models Benchmarked
 
-| Model | Architecture | Params (total / active) | Context | vLLM Flags |
-|-------|-------------|------------------------|---------|------------|
-| **Qwen3.5-397B-A17B** | MoE | 397B / 17B | 131,072 | |
-| **MiniMax-M2.5** | MoE | 230B / 10B | 196,608 | |
-| **Devstral-2-123B** | Dense | 123B | 262,144 | torch.compile mode 3, CUDAGraphs, fuse_act_quant=false (sm_120) |
+| Model | Architecture | Params (total / active) | Context | Engine | Notes |
+|-------|-------------|------------------------|---------|--------|-------|
+| **Qwen3.5-397B-A17B** | MoE | 397B / 17B | 131,072 | vLLM | |
+| **MiniMax-M2.5** | MoE | 230B / 10B | 196,608 | vLLM | |
+| **Devstral-2-123B** | Dense | 123B | 262,144 | vLLM | torch.compile mode 3, CUDAGraphs, fuse_act_quant=false (sm_120) |
+| **GLM-5.1-478B-A42B-REAP** | MoE (DSA) | 478B / 42B | 32,768 | sglang | *in progress* |
 
-All models: `tensor_parallel_size: 4`, `gpu_memory_utilization: 0.90`, `kv_cache_dtype: fp8_e4m3`, `enable_chunked_prefill: true`, `max_num_seqs: 128`, `max_num_batched_tokens: 65536`
+All vLLM models: `tensor_parallel_size: 4`, `gpu_memory_utilization: 0.90`, `kv_cache_dtype: fp8_e4m3`, `enable_chunked_prefill: true`, `max_num_seqs: 128`, `max_num_batched_tokens: 65536`
 
 ## Results Summary
 
@@ -57,7 +58,7 @@ All models: `tensor_parallel_size: 4`, `gpu_memory_utilization: 0.90`, `kv_cache
 uv pip install -e .
 ```
 
-Requires a running vLLM server (OpenAI-compatible API on `http://127.0.0.1:8000`) and having vllm at path, bench-sweep is relying on `vllm bench`
+Requires a running inference server (OpenAI-compatible API on `http://127.0.0.1:8000`) and having vllm at path, bench-sweep is relying on `vllm bench`
 
 ## Usage
 
@@ -99,10 +100,10 @@ bench-sweep --dry-run --model-id qwen35-397b-a17b-nvfp4 \
 
 ```
 bench/
-  {model}_W{watt}/
-    vllm.yaml                          # vLLM server configuration
-    b.log                              # bench-sweep invocation command
-    bench_sweep.log                    # Full execution log (all runs)
+  {model}_W{watt}_TP{tp}_{engine}/
+    vllm.yaml | sglang.yaml             # Server configuration
+    b.log                                # bench-sweep invocation command
+    bench_sweep.log                      # Full execution log (all runs)
 
     {model}_random_{in}in_{out}out_c{concurrency}_W{watt}/
       openai-infqps-concurrency{N}-{model}-{YYYYMMDD-HHMMSS}.json
@@ -159,7 +160,7 @@ Time-series GPU metrics sampled at ~2.4 Hz during each benchmark run. 4-GPU syst
 | `gpu{N}_temp_c` | int | C | Temperature |
 | `gpu{N}_pcie_tx_mb_s` | float | MB/s | PCIe transmit throughput |
 | `gpu{N}_pcie_rx_mb_s` | float | MB/s | PCIe receive throughput |
-| `kv_cache_pct` | float | % | KV cache utilization (from vLLM /metrics) |
+| `kv_cache_pct` | float | % | KV cache utilization (from server /metrics) |
 | `requests_running` | int | count | Active inference requests |
 | `requests_waiting` | int | count | Queued requests |
 
@@ -178,18 +179,18 @@ Example plots from Qwen3.5-397B-A17B (W300):
 
 | | |
 |---|---|
-| ![Overview P50](bench/qwen35-397b-a17b-nvfp4_W300/plots/qwen35-397b-a17b-nvfp4_compare_W300/compare_overview_p50.png) | ![Overview P95/P99](bench/qwen35-397b-a17b-nvfp4_W300/plots/qwen35-397b-a17b-nvfp4_compare_W300/compare_overview_p95_p99.png) |
-| ![Peak Power](bench/qwen35-397b-a17b-nvfp4_W300/qwen35-397b-a17b-nvfp4_random_2048in_1024out_c64_W300/telemetry_power.png) | ![Peak KV Cache](bench/qwen35-397b-a17b-nvfp4_W300/qwen35-397b-a17b-nvfp4_random_2048in_1024out_c64_W300/telemetry_kv_cache.png) |
+| ![Overview P50](bench/qwen35-397b-a17b-nvfp4_W300_TP4_vllm/plots/qwen35-397b-a17b-nvfp4_compare_W300/compare_overview_p50.png) | ![Overview P95/P99](bench/qwen35-397b-a17b-nvfp4_W300_TP4_vllm/plots/qwen35-397b-a17b-nvfp4_compare_W300/compare_overview_p95_p99.png) |
+| ![Peak Power](bench/qwen35-397b-a17b-nvfp4_W300_TP4_vllm/qwen35-397b-a17b-nvfp4_random_2048in_1024out_c64_W300/telemetry_power.png) | ![Peak KV Cache](bench/qwen35-397b-a17b-nvfp4_W300_TP4_vllm/qwen35-397b-a17b-nvfp4_random_2048in_1024out_c64_W300/telemetry_kv_cache.png) |
 
 <sub>Bottom row: power draw and KV cache at peak throughput (1,124 tok/s @ concurrency 64, 2048in/1024out)</sub>
 
-### vLLM Configs (`vllm.yaml`)
+### Engine Configs
 
-Per-model configs and checkpoint sources:
+**vLLM models:**
 
-- [Qwen3.5-397B-A17B](bench/qwen35-397b-a17b-nvfp4_W250/vllm.yaml) — checkpoint: [nvidia/Qwen3.5-397B-A17B-NVFP4](https://huggingface.co/nvidia/Qwen3.5-397B-A17B-NVFP4)
-- [MiniMax-M2.5](bench/minimax_m25-nvfp4_W250/vllm.yaml) — checkpoint: [lukealonso/MiniMax-M2.5-NVFP4](https://huggingface.co/lukealonso/MiniMax-M2.5-NVFP4)
-- [Devstral-2-123B](bench/devstral-2-123b-instruct-2512_W250/vllm.yaml) — checkpoint: [mistralai/Devstral-2-123B-Instruct-2512](https://huggingface.co/mistralai/Devstral-2-123B-Instruct-2512), manually quantized to NVFP4 using [LLM Compressor](https://github.com/vllm-project/llm-compressor) with `transformers` v5 (one-shot calibration on [nvidia/OpenCodeInstruct](https://huggingface.co/datasets/nvidia/OpenCodeInstruct), 128 samples, 8192 seq len) — [quantization script](src/misc/quantize_devstral2_123b_nvfp4.py)
+- [Qwen3.5-397B-A17B](bench/qwen35-397b-a17b-nvfp4_W250_TP4_vllm/vllm.yaml) — checkpoint: [nvidia/Qwen3.5-397B-A17B-NVFP4](https://huggingface.co/nvidia/Qwen3.5-397B-A17B-NVFP4)
+- [MiniMax-M2.5](bench/minimax_m25-nvfp4_W250_TP4_vllm/vllm.yaml) — checkpoint: [lukealonso/MiniMax-M2.5-NVFP4](https://huggingface.co/lukealonso/MiniMax-M2.5-NVFP4)
+- [Devstral-2-123B](bench/devstral-2-123b-instruct-2512_W250_TP4_vllm/vllm.yaml) — checkpoint: [mistralai/Devstral-2-123B-Instruct-2512](https://huggingface.co/mistralai/Devstral-2-123B-Instruct-2512), manually quantized to NVFP4 using [LLM Compressor](https://github.com/vllm-project/llm-compressor) with `transformers` v5 (one-shot calibration on [nvidia/OpenCodeInstruct](https://huggingface.co/datasets/nvidia/OpenCodeInstruct), 128 samples, 8192 seq len) — [quantization script](src/misc/quantize_devstral2_123b_nvfp4.py)
 
 served via:
 
