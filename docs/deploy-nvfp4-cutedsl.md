@@ -43,6 +43,7 @@ export PYTHONPATH="/mnt/hot/ambientlight/repos/sglang/python:/mnt/hot/ambientlig
 # FP4_MOE_NVFP4=1: re-quantize FP8→NVFP4 in process_weights_after_loading
 export SGLANG_DSV4_FP4_EXPERTS=0
 export SGLANG_FP4_MOE_NVFP4=1
+export SGLANG_NVFP4_STATIC_WS_CAP=128
 export SGLANG_OPT_FP8_WO_A_GEMM=0
 
 # --- Tilelang indexer + attention (CRITICAL for decode perf) ---
@@ -97,6 +98,7 @@ nohup bash /mnt/hot/ambientlight/repos/sglang/debug/launch-nvfp4.sh &
 |-----------|-------|-----------|
 | `SGLANG_DSV4_FP4_EXPERTS=0` | Disabled | Load weights as FP8 (FP4 buffer sizing breaks FP8 checkpoint loading) |
 | `SGLANG_FP4_MOE_NVFP4=1` | Enabled | Re-quantize MoE FP8→NVFP4 in process_weights_after_loading |
+| `SGLANG_NVFP4_STATIC_WS_CAP=128` | 128 | Pre-allocate static workspace for 128 routed rows (16 reqs × top_k=6 = 96, with headroom). Prevents workspace growth → RT kernel recompilation. Default 256 if unset. |
 | `--moe-runner-backend triton` | Triton | FP8-compatible weight loading; NVFP4 apply() bypasses runner |
 | `--cuda-graph-bs 1 2 4 8` | Include bs=8 | **Critical**: Without bs=8, 8-concurrent falls to 60 tok/s (eager) vs 460+ tok/s (graph) |
 | `SGLANG_OPT_USE_TILELANG_INDEXER=1` | Enabled | **Critical**: Same as FP8 — tilelang C4 indexer is shared infrastructure |
@@ -162,7 +164,7 @@ Added to `flashinfer/fused_moe/cute_dsl/blackwell_sm12x/moe_dispatch.py`:
 
 2. **`_get_static_kernel_rt()`**: Compilation function that uses pointer fakes for runtime-shaped args. Cache key has NO `m`. MAC is fixed to hardware limit (188 SMs) to prevent tuned-ladder recompilation.
 
-3. **Capped workspace** (in SGLang `mxfp4_marlin_moe.py`): Static workspace pre-allocates `max(routed_rows, 128)` rows, preventing workspace growth from creating new cache keys.
+3. **Capped workspace** (in SGLang `mxfp4_marlin_moe.py`): Static workspace pre-allocates `max(routed_rows, SGLANG_NVFP4_STATIC_WS_CAP)` rows (default 256, set to 128 in launch script for 16 reqs × top_k=6 = 96), preventing workspace growth from creating new cache keys.
 
 4. **Dual-path dispatch in `launch_sm120_static_moe()`**:
    - CUDA graph capture: original per-M compiled kernel (graph needs fixed shapes)
