@@ -8,7 +8,18 @@
 calibration path and every Quest-1 hack are **deliberately not upstreamed** — they are superseded and only
 weaken the upstream argument.
 
+> ## ⛔ EXECUTION POLICY (read first)
+> - **NEVER open a PR automatically.** Every PR is reviewed and opened **manually by the human.** Tooling
+>   may prepare branches, diffs, commit messages, and PR-body drafts — but `gh pr create` / pushing to a
+>   PR is a human action only.
+> - **The PRs are a STACK, not parallel.** They build on each other (A → B → B½ → C → D → E → F). Prepare
+>   them as **stacked branches**, each branched off the previous PR's branch (not all off `upstream/main`),
+>   so each diff shows only its own delta. Rebase the stack forward when an earlier PR changes in review.
+> - Assistant deliverables per PR: the prepared stacked branch (local), the curated commit(s), a draft PR
+>   title + body, and the test files. **Stop there.** The human opens it.
+
 ---
+
 
 ## 1. Objective
 
@@ -94,30 +105,53 @@ sidecar, `input_gs`/`down_input_scale`, the Marlin-class hijack, `SGLANG_FP4_MOE
 
 ---
 
-## 4. PR sequence
+## 4. PR sequence (STACKED branches — never opened automatically)
+
+Each branch is cut **off the previous PR's branch**, so each PR's diff shows only its own delta. The FlashInfer
+stack is rooted on `flashinfer-ai/flashinfer:main`; the SGLang stack on `sgl-project/sglang:main`. SGLang PRs
+**D–E depend on FlashInfer PR C's API**, so they can be prepared in parallel but only open once C's branch is
+stable.
 
 ```
-FlashInfer A: num_m_tiles fix              (standalone correctness — ships first)
+flashinfer-ai/flashinfer:main
         │
-        ▼
-FlashInfer B: MXF4 common + dense MmaMXF4Op (has public mm_fp4 consumer)
-        │
-        ▼
-FlashInfer C: SM120 W4A4-mx fused MoE + dispatch + RT(sf_vec_size=32)
-        │
-        ▼
-SGLang D: feature-gated flashinfer_cutedsl selection on SM120
-        │
-        ▼
-SGLang E: Mxfp4W4A4MoEMethod
-        │
-        ▼
-SGLang F: docs + benchmark cookbook
+        ▼  A   fix: num_m_tiles            (clean cherry-pick of 39e86f19 — VERIFIED conflict-free)
+        ▼  B   feat: MXF4 common + dense MmaMXF4Op
+        ▼  B½  feat: _StaticMoELaunch runtime-m static wrapper   ← NOT yet upstream; PR C needs it
+        ▼  C   feat: SM120 W4A4-mx fused MoE + dispatch + RT(sf_vec_size=32)
 
-(separate, optional, NOT blocking: sgl-kernel G — SM120 HMMA sparse-decode perf)
+sgl-project/sglang:main
+        │
+        ▼  D   fix: flashinfer_cutedsl selection on SM120   (feature-probes C's API)
+        ▼  E   feat: Mxfp4W4A4MoEMethod
+        ▼  F   docs + benchmark cookbook
+
+(separate, optional, NEVER blocking: sgl-kernel G — SM120 HMMA sparse-decode perf)
 ```
 
-Keep each PR small enough that a maintainer can say yes without accepting the whole project.
+Keep each PR small enough that a maintainer can say yes without accepting the whole project. **The human
+opens every PR manually** (see Execution Policy at top).
+
+### Consolidated PR table (verified against commit/diff state 2026-06-07)
+
+| PR | Repo | Title | Files | ~Size | Source (local) | Branch-prep method | Depends on |
+|----|------|-------|-------|------:|----------------|--------------------|------------|
+| **A** | FlashInfer | `fix(sm120-moe): derive M tile count from atom layout` | `moe_{static,micro,dynamic}_kernel.py` + `test_sm120_moe_num_m_tiles.py` | +35/−9 | `39e86f19` | **cherry-pick** (verified conflict-free onto `main`) | — |
+| **B** | FlashInfer | `feat(sm120): MXFP4 E8M0/32 quant helpers + MmaMXF4Op dense` | `fp4_common.py` (+127), `dense_blockscaled_gemm_sm120_b12x.py` (+53), `gemm_base.py` (+15) + 2 tests | ~+195 | hunks of `1c2cefc1` | **by-hunk** | A; ⚠️ rebase-check vs upstream `d9b175ac` (NVFP4 4over6, same file) |
+| **B½** | FlashInfer | `feat(sm120-moe): _StaticMoELaunch runtime-m static wrapper` | `moe_dispatch.py` (`_StaticMoELaunch` + `_get_static_kernel_rt` + dual-path dispatch) | ~+356 | `906556fb` (Quest-1 base, **not upstream**) | **cherry-pick** (NVFP4-only; pre-dates W4A4) | B |
+| **C** | FlashInfer | `feat(sm120-moe): native MXFP4×MXFP4 CuTe-DSL fused MoE` | `moe_{static,micro,dynamic}_kernel.py`, `moe_dispatch.py` (+~81 W4A4 threading), `launch_sm120_moe` + `test_b12x_mxfp4_fused_moe.py` | ~+1100 | hunks of `1c2cefc1`,`b8fdbd02`,`aac5a172`,`91e527af` | **by-hunk** | **A + B + B½** |
+| **D** | SGLang | `fix(moe): allow FlashInfer CuTe-DSL MoE selection on SM120` | `server_args.py`, MoE backend-select util + tests | ~small | new (extract from routing) | **author fresh** | FlashInfer **C** API; ⚠️ `server_args.py` collides w/ open #27059 |
+| **E** | SGLang | `feat(deepseek-v4): native SM120 MXFP4 W4A4 MoE via FlashInfer CuTe-DSL` | `mxfp4_w4a4_moe.py` (new, +366), `fp8.py` (+32) + test | +398 | `1bec556c`,`7b20149a` | **by-hunk** (drop the HMMA edit) | **C + D**; ⚠️ close dummy-load unknown first |
+| **F** | SGLang | `docs(deepseek-v4): native SM120 MXFP4 W4A4 MoE path` | `docs/...` (port deploy guide) | docs | port `docs/deploy-mxfp4-w4a4-cutedsl.md` | **author fresh** | E |
+| **G** | sgl-kernel | `perf(sgl-kernel): SM120 HMMA FlashMLA backend` | sgl-kernel src + wrapper | — | external `.so` (must port in-tree) | **optional, later** | none; **NEVER blocks A–F** (see §6) |
+
+**The `_StaticMoELaunch` prerequisite (B½) — the one real snag.** Our entire W4A4 stack sits on `906556fb`
+("_StaticMoELaunch runtime-m wrapper for NVFP4 static MoE"), which is **not in upstream `main`**. The
+`moe_dispatch.py` total delta is ~+429 lines, but **~+356 of that is `_StaticMoELaunch` itself** (the Quest-1
+base) and only **~+81 is the W4A4 `quant_mode="mxfp4"` threading**. So PR C cannot apply without it. B½ carries
+it as an NVFP4-only infrastructure PR (it pre-dates and is independent of MXFP4 — it's the shape-agnostic
+runtime-M static launcher), landing between B and C. If a maintainer would rather take `_StaticMoELaunch` as
+part of C, fold B½ into C; default is to keep it separate for reviewability.
 
 ---
 
@@ -125,22 +159,39 @@ Keep each PR small enough that a maintainer can say yes without accepting the wh
 
 ### PR A — FlashInfer: `fix(sm120-moe): derive M tile count from atom layout`
 **Files:** `moe_{static,micro,dynamic}_kernel.py` + `tests/moe/test_sm120_moe_num_m_tiles.py`.
-Pure correctness, no MXFP4. Test: skewed routing, one expert gets 128/256/768 rows, assert rows 64:128
-nonzero vs a BF16/dequant reference; assert NVFP4 random routing unchanged. Local: `39e86f19`
-(validated by `nvfp4_b12x_regression.py`, within=1.0000 after fix). **Lands first — builds reviewer
-trust, unblocks nothing downstream from a simple bug.**
+Pure correctness, no MXFP4. **Cherry-pick of `39e86f19` — dry-run VERIFIED conflict-free onto `upstream/main`
+(3 files, +35/−9, 0 conflicts).** Independent of `_StaticMoELaunch` (that lives only in `moe_dispatch.py`;
+this touches only the 3 kernels' `self.num_m_tiles` line). Test: skewed routing, one expert gets 128/256/768
+rows, assert rows 64:128 nonzero vs a BF16/dequant reference; assert NVFP4 random routing unchanged. Validated
+locally by `nvfp4_b12x_regression.py` (within=1.0000 after fix). **Lands first — builds reviewer trust,
+unblocks nothing downstream from a simple bug.**
 
 ### PR B — FlashInfer: `feat(sm120): MXFP4 E8M0/32 quant helpers + MmaMXF4Op dense path`
 **Files:** `fp4_common.py`, `dense_blockscaled_gemm_sm120_b12x.py`, `gemm_base.py`, +
 `tests/gemm/test_sm120_mxfp4_dense.py`, `tests/cute_dsl/test_mxfp4_quant_helpers.py`.
+**Branch-prep: by-hunk** (these files are interleaved with PR-C content in `1c2cefc1`, so cherry-pick can't
+separate them). ⚠️ **Rebase-check:** upstream landed `d9b175ac` ("Add CuTe DSL NVFP4 quantization with 4over6
+FP16 scoring", #3448) in `fp4_common.py` after our merge-base — likely additive, but verify the hunks apply.
 Reviewer promise: *"MXFP4 representation + dense support only; no fused-MoE dispatch change."* Tests:
 E8M0 byte-exactness vs numpy; FP4 nibble roundtrip; dense MXFP4 GEMM cos ≥ 0.99999 vs dequant ref; NVFP4
 dense unchanged; `MmaMXF4Op` selected only for sf_vec_size=32. Reachable via the public
 `mm_fp4(backend="b12x", use_nvfp4=False)`, so it is not a dead standalone.
 
+### PR B½ — FlashInfer: `feat(sm120-moe): _StaticMoELaunch runtime-m static wrapper`
+**Files:** `moe_dispatch.py` (`_StaticMoELaunch` class + `_get_static_kernel_rt()` + the dual-path dispatch in
+`launch_sm120_static_moe`). **Cherry-pick of `906556fb`** (Quest-1 commit). This is **NVFP4-only and predates
+MXFP4** — it removes `m` from the static-kernel compile cache key (the shape-agnostic runtime-M launcher; CUDA
+graph → per-M kernel, non-graph → RT wrapper). It is **not in upstream `main`**, and PR C's `moe_dispatch.py`
+W4A4 threading is built on top of it, so it must land between B and C (or be folded into C if a maintainer
+prefers). Reviewer framing: *"infrastructure: eliminates per-M JIT recompilation for the existing SM120 NVFP4
+static MoE; no new quant format."* Tests: a runtime-M cache test (one module reused across M; CUDA-graph path
+still uses the per-M kernel).
+
 ### PR C — FlashInfer: `feat(sm120-moe): native MXFP4xMXFP4 CuTe-DSL fused MoE`
-**Files:** `moe_{static,micro,dynamic}_kernel.py`, `moe_dispatch.py`, public `launch_sm120_moe`, +
-`tests/moe/test_b12x_mxfp4_fused_moe.py`. `quant_mode="mxfp4"`, `sf_vec_size=32`, `tile_k=128` (preserves
+**Depends on A + B + B½.** **Files:** `moe_{static,micro,dynamic}_kernel.py`, `moe_dispatch.py` (the ~+81 W4A4
+`quant_mode="mxfp4"` threading on top of B½'s `_StaticMoELaunch`), public `launch_sm120_moe`, +
+`tests/moe/test_b12x_mxfp4_fused_moe.py`. **Branch-prep: by-hunk** (W4A4 hunks span `1c2cefc1`/`b8fdbd02`/
+`aac5a172`/`91e527af`). `quant_mode="mxfp4"`, `sf_vec_size=32`, `tile_k=128` (preserves
 the FC1-epi-N == FC2-K coupling), E8M0/32 Phase-1/Phase-2 quant, static/micro/dynamic incl. all dynamic
 routing sub-paths, `quant_mode`+sf in every cache key, RT wrapper parameterized for E8M0. Reviewer
 promise: *"all new behavior gated on `quant_mode=="mxfp4"` / `sf_vec_size==32`; NVFP4 unchanged except
@@ -235,37 +286,62 @@ Triton SM120 sparse decode. Re-pursue HMMA later (if ever) as a separate, option
 5. **Large MoE diff rejected.** → The A/B/C split exists for exactly this.
 6. **Dummy-load capture IMA.** → #25892 fixed the router side; we must verify *our* `apply()` +
    `process_weights_after_loading` are dummy-load-safe (the one open local unknown — close before PR E).
-7. **Branches not pushed / token stale.** → See §8: the SGLang fork branch is **not pushed yet**.
+7. **Forks / remotes.** → DONE: both forks synced + branches pushed; FlashInfer `upstream` remote added
+   and `main` fetched (§8). PR-A cherry-pick dry-run verified conflict-free.
 
 ---
 
 ## 8. Pre-flight (ground-truth state, 2026-06-07)
 
-- **FlashInfer fork `origin`** = `https://github.com/ambientlight/flashinfer.git`. `sm120-nvfp4-rebase`
-  pushed but **1 commit behind** (`aac5a172`; local tip `91e527af` — the RT comment cleanup). **No
-  `upstream` remote configured.**
-- **SGLang fork `origin`** = `https://github.com/ambientlight/sglang.git`. `sm120-nvfp4-rebase` is **NOT
-  pushed.** `upstream` = `sgl-project/sglang` IS configured.
+### Remotes / push state — DONE
+- **FlashInfer fork `origin`** (`ambientlight/flashinfer`) @ `sm120-nvfp4-rebase` = `91e527af` — **synced,
+  all 5 W4A4 commits pushed.** `upstream` (`flashinfer-ai/flashinfer`) **added + `main` fetched** (tip
+  `a2870343`). Merge-base with `main` = `0037a9c1`.
+- **SGLang fork `origin`** (`ambientlight/sglang`) @ `sm120-nvfp4-rebase` = `7b20149a` — **synced, both W4A4
+  commits pushed.** `upstream` (`sgl-project/sglang`) configured.
 
-### Commit-splittability reality (important)
-The proposed B/C split does **not** map to our commits — the WIP base `1c2cefc1` interleaves
-`fp4_common.py` + `dense_blockscaled_gemm` + `gemm_base.py` (PR B) **and** `moe_static_kernel.py` +
-`moe_dispatch.py` (PR C) in **one commit**. So "cherry-pick the dense part" **won't work** — the
-upstream-bound B/C branches must be **reconstructed by hunk from the working tree**, not cherry-picked.
-(`39e86f19` num_m_tiles is cleanly separable → PR A is a true cherry-pick. `b8fdbd02` is micro+dynamic+
-dispatch → folds into C. `aac5a172`+`91e527af` are the RT wrapper → C or split-out.)
+### Commit-splittability reality (drives branch-prep method per PR)
+The B/C split does **not** map to our commits — `1c2cefc1` interleaves PR-B files (`fp4_common.py`, dense,
+`gemm_base.py`) and PR-C files (`moe_*`, `moe_dispatch.py`) in one commit. So:
+- **PR A** = clean **cherry-pick** of `39e86f19` (**dry-run verified: 0 conflicts onto `main`**).
+- **PR B½** = clean **cherry-pick** of `906556fb` (`_StaticMoELaunch`, NVFP4-only, pre-MXFP4).
+- **PR B and PR C** = **reconstruct by hunk** from the working tree (not cherry-pickable).
+- `b8fdbd02` (micro+dynamic+dispatch) and `aac5a172`+`91e527af` (RT sf_vec_size=32) → fold into C.
 
-### Day-zero
-1. Add `upstream` remote to FlashInfer; `git fetch upstream` both repos.
-2. Push the SGLang fork branch (token now valid).
-3. Reconstruct upstream-bound branches **fresh from `upstream/main`**:
-   - FlashInfer: `fix/sm120-moe-num-m-tiles` (cherry-pick `39e86f19`); `feat/sm120-mxfp4-common-dense`
-     and `feat/sm120-mxfp4-moe` (re-split `1c2cefc1`/`b8fdbd02`/`aac5a172` **by hunk**).
-   - SGLang: `fix/sm120-flashinfer-cutedsl-selection`; `feat/sm120-mxfp4-w4a4-moe` (clean
-     `Mxfp4W4A4MoEMethod` only, **HMMA edit excluded**); `docs/sm120-mxfp4-w4a4-moe`.
-4. `git range-diff` each upstream branch vs the fork to confirm only intended hunks are included and **no
-   HMMA / env-var / sys.path / calibration content leaked in.**
-5. **Close the dummy-load unknown locally** (PR E pre-req) before opening E.
+### Branch-prep procedure (STACKED — assistant prepares, human opens)
+Reminder: **never run `gh pr create` / never open a PR.** Prepare local stacked branches + draft PR bodies;
+the human opens each manually.
+
+```bash
+# FlashInfer stack (each branch off the PREVIOUS, not off main):
+git checkout -b pr/A-num-m-tiles            upstream/main
+git cherry-pick 39e86f19                    # verified clean
+# (add tests/moe/test_sm120_moe_num_m_tiles.py)
+
+git checkout -b pr/B-mxf4-common-dense      pr/A-num-m-tiles
+# reconstruct fp4_common + dense + gemm_base hunks; rebase-check vs d9b175ac
+
+git checkout -b pr/Bhalf-static-rt          pr/B-mxf4-common-dense
+git cherry-pick 906556fb                    # _StaticMoELaunch
+
+git checkout -b pr/C-mxfp4-fused-moe        pr/Bhalf-static-rt
+# reconstruct the W4A4 hunks (moe_* + moe_dispatch threading + RT sf_vec_size=32)
+
+# SGLang stack (off upstream/main; opens once FlashInfer C is stable):
+git checkout -b pr/D-cutedsl-selection      upstream/main
+git checkout -b pr/E-mxfp4-w4a4-method      pr/D-cutedsl-selection   # 1bec556c+7b20149a by-hunk, HMMA edit EXCLUDED
+git checkout -b pr/F-docs                    pr/E-mxfp4-w4a4-method
+```
+
+After preparing each branch: `git range-diff upstream/main..pr/X <our-fork-equivalent>` to confirm only
+intended hunks are present and **no HMMA / env-var / sys.path / calibration content leaked in.** When an
+earlier PR changes in review, **rebase the whole stack forward** (`git rebase --onto` the updated parent).
+
+### Open items before specific PRs
+- **Before PR B:** confirm the `fp4_common.py` hunks apply over upstream `d9b175ac`.
+- **Before PR E:** **close the dummy-load unknown** — verify our `Mxfp4W4A4MoEMethod.apply()` +
+  `process_weights_after_loading` are safe under `--load-format dummy` (real swizzles assume initialized
+  tensors; #25892 only fixed the router `tid2eid`, not MoE weights).
 
 ---
 
