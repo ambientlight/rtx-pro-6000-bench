@@ -285,51 +285,133 @@ watch -n1 nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv,nohead
 
 ## Appendix: E2E Kernel Pipeline (W4A4-mx Decode, 1 Token)
 
-Identical to the FP8/NVFP4 pipeline except the MoE FFN block (marked ★). Embedding, attention (MQA + C4
-indexer + HMMA sparse decode), dense FFN, LM head, and sampling are all unchanged from the FP8 path; see
-`deploy-nvfp4-cutedsl.md` for the full diagram. The only difference is the MoE expert block:
+Blocks marked ★ differ from the FP8 path. Only the **MoE FFN expert GEMM** is W4A4-mx; everything else
+(embedding, MQA attention + C4 indexer + HMMA sparse decode, dense FFN, LM head, sampling) is identical
+to the FP8/NVFP4 paths.
 
 ```
-+-- MoE FFN (43 MoE layers) ------------------------------------- ★ ---+
-|  Router gate GEMM + topk                       [Triton]              |
-|                                                                       |
-|  ★ Native MXFP4×MXFP4 Fused MoE (FlashInfer CuTe-DSL SM120):         |
-|  +-- DECODE (captured CUDA graph) -------------------------------+   |
-|  |  bs 1/2/4  -> MICRO kernel (per-M, fixed shape)               |   |
-|  |  bs 8/16   -> STATIC per-M kernel (fixed shape)               |   |
-|  |    Phase-1: quantize activations -> MXFP4 (E8M0/32, runtime)  |   |
-|  |    FC1 (w3|w1) + SiLU·mul + Phase-2 requant -> FC2 (w2)       |   |
-|  |    (all fused, MmaMXF4Op W4A4 tensor cores)   [CuTe-DSL JIT]  |   |
-|  +---------------------------------------------------------------+   |
-|  +-- EAGER / PREFILL (non-graph) ---------------------------------+   |
-|  |  routed <=640 -> STATIC via _StaticMoELaunch RT wrapper       |   |
-|  |                  (one module, M-independent, sf_vec_size=32)   |   |
-|  |  routed  >640 -> DYNAMIC W4A4 fused MoE (M-independent)        |   |
-|  +---------------------------------------------------------------+   |
-|                                                                       |
-|  TP AllReduce                                  [NCCL LL/Ring]        |
-+---------------------------------------------------------------------+
+TOKEN IN
+    |
+    v
++-- EMBEDDING ------------------------------------------------ [Torch] --+
+|  VocabParallelEmbedding -> embed + repeat for HC                        |
++-------------------------------------------------------------------------+
+    |
+    v
++-- PER LAYER x61 -------------------------------------------------------+
+|                                                                          |
+|  +-- HC_PRE (attention) ----------------------------------------------+ |
+|  |  deep_gemm tf32 prenorm GEMM              [DeepGEMM]               | |
+|  |  mhc_pre fused Sinkhorn+RMSNorm           [TileLang 0.1.8]        | |
+|  +--------------------------------------------------------------------+ |
+|      |                                                                   |
+|      v                                                                   |
+|  +-- MQA ATTENTION ---------------------------------------------------+ |
+|  |  Q proj: wq_a FP8 GEMM                    [Triton FP8]             | |
+|  |  Q norm + RoPE fused                       [Triton]                 | |
+|  |  Q proj: wq_b FP8 GEMM                    [Triton FP8]             | |
+|  |  KV proj + cache write                     [Triton]                 | |
+|  |                                                                      | |
+|  |  C4 Indexer:                                                         | |
+|  |    compressor gate GEMM                    [Triton]                 | |
+|  |    fused_q_indexer_rope_hadamard_quant     [Triton]                 | |
+|  |    fp8_paged_mqa_logits                    [TileLang 0.1.8]        | |
+|  |    topk_transform_512                      [Triton]                 | |
+|  |                                                                      | |
+|  |  Sparse Decode:                                                      | |
+|  |    sparse_decode_fwd                       [HMMA custom .so]        | |
+|  |                                                                      | |
+|  |  Output:                                                             | |
+|  |    wo_a FP8 einsum                         [DeepGEMM]               | |
+|  |    wo_b FP8 GEMM + AllReduce               [Triton + NCCL]         | |
+|  +--------------------------------------------------------------------+ |
+|      |                                                                   |
+|      v                                                                   |
+|  +-- HC_POST (attention) ---------------------------------------------+ |
+|  |  mhc_post fused combine+residual          [TileLang 0.1.8]        | |
+|  +--------------------------------------------------------------------+ |
+|      |                                                                   |
+|      v                                                                   |
+|  +-- HC_PRE (FFN) ----------------------------------------------------+ |
+|  |  (same as attention HC_PRE)          [DeepGEMM + TileLang]         | |
+|  +--------------------------------------------------------------------+ |
+|      |                                                                   |
+|      v                                                                   |
+|  +-- MoE FFN (43 MoE layers) ----------------------------------- ★ ---+ |
+|  |  Router gate GEMM + topk                   [Triton]                 | |
+|  |                                                                      | |
+|  |  ★ Native MXFP4xMXFP4 Fused MoE (FlashInfer CuTe-DSL SM120):       | |
+|  |     weights: E2M1 int8 + E8M0/32 block scales (loaded as-is)        | |
+|  |     MmaMXF4Op  -> mma.kind::mxf4 .scale_vec::2X .ue8m0              | |
+|  |                                                                      | |
+|  |  +-- DECODE (captured CUDA graph replay) -----------------------+   | |
+|  |  |  bs 1/2/4 (routed<=40) -> MICRO kernel   (per-M, fixed shape) |   | |
+|  |  |  bs 8/16  (routed<=640) -> STATIC per-M  (fixed shape)        |   | |
+|  |  |    Phase-1: quantize x -> MXFP4 (E8M0/32, runtime self-scale) |   | |
+|  |  |    FC1 (w3|w1 gate/up) GEMM                                   |   | |
+|  |  |    SiLU(gate)*up  +  Phase-2 requant -> MXFP4                 |   | |
+|  |  |    FC2 (w2 down) GEMM                                         |   | |
+|  |  |    (all fused, MmaMXF4Op W4A4 TC)            [CuTe-DSL JIT]   |   | |
+|  |  +---------------------------------------------------------------+   | |
+|  |  +-- EAGER / PREFILL (non-graph) -------------------------------+   | |
+|  |  |  routed<=640 -> STATIC via _StaticMoELaunch RT wrapper        |   | |
+|  |  |                 (ONE module, M-independent, sf_vec_size=32)    |   | |
+|  |  |  routed >640 -> DYNAMIC W4A4 fused MoE (M-independent)        |   | |
+|  |  +---------------------------------------------------------------+   | |
+|  |                                                                      | |
+|  |  TP AllReduce                              [NCCL LL/Ring]          | |
+|  +--------------------------------------------------------------------+ |
+|      |                                                                   |
+|      v                                                                   |
+|  +-- Dense FFN (3+15 layers) -----------------------------------------+ |
+|  |  (Same as FP8: Triton FP8 fused MoE runner)                        | |
+|  +--------------------------------------------------------------------+ |
+|      |                                                                   |
+|      v                                                                   |
+|  +-- HC_POST (FFN) ---------------------------------------------------+ |
+|  |  mhc_post fused combine+residual          [TileLang 0.1.8]        | |
+|  +--------------------------------------------------------------------+ |
++-------------------------------------------------------------------------+
+    |
+    v
++-- LM HEAD --------------------------------------------------------------+
+|  fused_hc_head (weighted sum + RMSNorm)       [Triton]                   |
+|  lm_head FP8 GEMM -> logits                   [Triton FP8]              |
++-------------------------------------------------------------------------+
+    |
+    v
++-- SAMPLING --------------------------------------------------------------+
+|  top_k_top_p_sampling_from_probs              [FlashInfer AOT]           |
++-------------------------------------------------------------------------+
+    |
+    v
+TOKEN OUT
 ```
 
-### ★ NVFP4 (re-quant) vs W4A4-mx (native): What Changed in the MoE Block
-
-| Component | NVFP4 Path | W4A4-mx Path (this) |
-|-----------|------------|---------------------|
-| Weight format | NVFP4 (MXFP4→BF16→NVFP4 re-quant) | **native MXFP4** (E2M1 + E8M0, as-shipped) |
-| Weight numerics | double-quantized (lossy) | **lossless** (no conversion) |
-| MMA instruction | `mma.kind::mxf4nvf4 .scale_vec::4X .ue4m3` (`MmaMXF4NVF4Op`) | `mma.kind::mxf4 .scale_vec::2X .ue8m0` (`MmaMXF4Op`) |
-| Activation scale | E4M3 16-block + per-expert **global scale (calibrated)** | E8M0 32-block, **self-scaling, no calibration** |
-| Load-time prep | FP8 dequant → BF16 → `nvfp4_quantize` (~8s) | gate/up swap + E8M0→MMA swizzle (~instant) |
-| SGLang method | `Mxfp4MarlinMoEMethod` (Marlin-class hijack) | `Mxfp4W4A4MoEMethod` (clean `FusedMoEMethodBase`) |
-| Decode @16w | 759 tok/s | **742 tok/s** |
-
-### Kernel Backend Summary (MoE block only; rest identical to FP8/NVFP4)
+### Kernel Backend Summary
 
 | Backend | Ops | Notes |
 |---------|-----|-------|
-| ★ **CuTe-DSL (JIT)** | **MoE W4A4-mx fused experts** | `MmaMXF4Op` (E8M0/32). Micro/static per-M in captured graphs; RT wrapper + dynamic eager/prefill. |
-| Triton | Router gate GEMM + topk | unchanged |
-| NCCL | TP all-reduce (LL/Ring over PCIe) | unchanged |
+| ★ **CuTe-DSL (JIT)** | **MoE W4A4-mx fused experts** | `MmaMXF4Op` (E8M0/32). Micro/static per-M in captured graphs; `_StaticMoELaunch` RT wrapper + dynamic on eager/prefill. |
+| **Triton** | FP8 GEMMs (dense), RoPE, norms, topk, router gate | Bulk of non-MoE compute |
+| **TileLang 0.1.8** | HC pre/post, C4 indexer logits | Version-pinned (0.1.10 crashes SM120) |
+| **HMMA custom** | Sparse decode attention | `deepseek-v4-flash-sm120/deepseek_v4_kernel/` |
+| **DeepGEMM** | HC prenorm, wo_a einsum | SM100 TF32 paths, work on SM120 |
+| **NCCL** | TP all-reduce (LL/Ring over PCIe) | ~13% of decode time |
+| **FlashInfer** | Sampling only | AOT precompiled for SM120 |
+| **Torch** | Embedding, topk_v2 fallback | Minimal |
 
-All non-MoE backends (Triton FP8 dense GEMMs, TileLang 0.1.8 HC/indexer, HMMA sparse decode, DeepGEMM,
-FlashInfer sampling) are **identical to the FP8/NVFP4 paths**.
+### ★ FP8 vs NVFP4 vs W4A4-mx: What Changed in the MoE Block
+
+| Component | FP8 Path | NVFP4 Path (re-quant) | W4A4-mx Path (this, native) |
+|-----------|----------|------------------------|------------------------------|
+| Weight format | FP8 (e4m3) + block scales | NVFP4 (MXFP4→BF16→NVFP4 re-quant) | **native MXFP4** (E2M1 int8 + E8M0, as-shipped) |
+| Weight numerics | FP8 | double-quantized (lossy) | **lossless** (no conversion) |
+| MMA instruction | FP8 W8A8 TC | `mma.kind::mxf4nvf4 .scale_vec::4X .ue4m3` (`MmaMXF4NVF4Op`) | `mma.kind::mxf4 .scale_vec::2X .ue8m0` (`MmaMXF4Op`) |
+| MoE dispatch | SGLang Triton fused MoE runner | FlashInfer CuTe-DSL (`Mxfp4MarlinMoEMethod`) | FlashInfer CuTe-DSL (`Mxfp4W4A4MoEMethod`, clean) |
+| Activation quant | dynamic FP8 (per-token) | NVFP4 + **one-shot calibration** (per-layer amax) | MXFP4 E8M0/32, **self-scaling, no calibration** |
+| Load-time prep | none | FP8 dequant → BF16 → `nvfp4_quantize` (~8s) | gate/up swap + E8M0→MMA swizzle (~instant) |
+| Decode kernel | Triton FP8 (W8A8) | CuTe-DSL static W4A4 (RT wrapper) | CuTe-DSL static/micro W4A4 (RT wrapper) |
+| Prefill kernel | Triton FP8 (W8A8) | CuTe-DSL dynamic W4A4 | CuTe-DSL dynamic W4A4 |
+| Tensor cores | FP8 W8A8 | FP4 W4A4 | **FP4 W4A4** |
+| Decode @16w | — | 759 tok/s | **742 tok/s** |
