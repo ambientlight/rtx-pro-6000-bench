@@ -18,7 +18,7 @@ Benchmark sweep harness for local coding model inference on NVIDIA Blackwell GPU
 | **Qwen3.5-397B-A17B** | MoE | 397B / 17B | 131,072 | vLLM | |
 | **MiniMax-M2.5** | MoE | 230B / 10B | 196,608 | vLLM | |
 | **Devstral-2-123B** | Dense | 123B | 262,144 | vLLM | torch.compile mode 3, CUDAGraphs, fuse_act_quant=false (sm_120) |
-| **DeepSeek-V4-Flash** | MoE (MLA + sparse) | 291B / — | 1,048,576 | sglang | native MXFP4 W4A4 experts + HMMA tensor-core sparse decode (sm_120); TP4 |
+| **DeepSeek-V4-Flash** | MoE (MLA + sparse) | 284B / 13B | 1,048,576 | sglang | native MXFP4 W4A4 experts + HMMA tensor-core sparse decode (sm_120); TP4 |
 
 All vLLM models: `tensor_parallel_size: 4`, `gpu_memory_utilization: 0.90`, `kv_cache_dtype: fp8_e4m3`, `enable_chunked_prefill: true`, `max_num_seqs: 128`, `max_num_batched_tokens: 65536`
 
