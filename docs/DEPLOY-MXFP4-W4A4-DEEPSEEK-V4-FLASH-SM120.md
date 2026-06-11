@@ -22,11 +22,11 @@ Recipe for serving [DeepSeek-V4-Flash](https://huggingface.co/deepseek-ai/DeepSe
 | Python | 3.12.3 | |
 | PyTorch | 2.11.0+cu130 | CUDA 13.0 |
 | Triton | 3.6.0 | |
-| flashinfer-python | 0.6.13 (fork [`ambientlight/mxfp4-fused-moe`](https://github.com/ambientlight/flashinfer/tree/ambientlight/mxfp4-fused-moe), over 0.6.11.post3 base) | `ambientlight/flashinfer`; MXFP4 kernels. Mismatches cubin → needs `FLASHINFER_DISABLE_VERSION_CHECK=1` |
+| flashinfer-python | 0.6.13 (fork [`ambientlight/mxfp4-fused-moe`](https://github.com/ambientlight/flashinfer/tree/ambientlight/mxfp4-fused-moe), over 0.6.11.post3 base) | MXFP4 kernels. Mismatches cubin → needs `FLASHINFER_DISABLE_VERSION_CHECK=1` |
 | flashinfer-cubin | 0.6.12 | pulled by sglang's pin; the fork's python tolerates it |
 | transformers | 5.8.1 | needs `deepseek_v4` |
 | sgl-kernel | 0.4.3 | pulled by sglang; SM120 path uses no new API |
-| sglang | fork [`feat/sm120-mxfp4-w4a4-moe`](https://github.com/ambientlight/sglang/tree/feat/sm120-mxfp4-w4a4-moe) | `ambientlight/sglang`; MXFP4 W4A4 method + feature-probe + decode & prefill toggles |
+| sglang | fork [`feat/sm120-mxfp4-w4a4-moe`](https://github.com/ambientlight/sglang/tree/feat/sm120-mxfp4-w4a4-moe) | MXFP4 W4A4 method + feature-probe + decode & prefill toggles |
 | deepseek_v4_kernel (HMMA) | fork [`feat/hmma-tensor-core-sparse-decode`](https://github.com/ambientlight/deepseek-v4-flash-sm120/tree/feat/hmma-tensor-core-sparse-decode) | custom [sparse_decode_kernel.cuh](https://github.com/ambientlight/deepseek-v4-flash-sm120/blob/feat/hmma-tensor-core-sparse-decode/csrc/sm120/decode/sparse_decode_kernel.cuh) + [parse_prefill_kernel.cuh](https://github.com/ambientlight/deepseek-v4-flash-sm120/blob/feat/hmma-tensor-core-sparse-decode/csrc/sm120/prefill/sparse_prefill_kernel.cuh) |
 
 ---
@@ -66,8 +66,8 @@ python -c "from deepseek_v4_kernel.ops import sparse_decode_fwd, sparse_prefill_
 
 Three forks, all gated SM120-only:
 
-- **FlashInfer** `ambientlight/mxfp4-fused-moe` ([#3541](https://github.com/flashinfer-ai/flashinfer/pull/3541), draft) — CuTe-DSL fused-SwiGLU `MmaMXF4Op` MXFP4 MoE kernels + the `sm120_moe_supported_quant_modes()` capability probe.
-- **SGLang** `feat/sm120-mxfp4-w4a4-moe` — `Mxfp4W4A4MoEMethod` (+ shared E8M0 swizzle), the `fp8.py` feature-probe that auto-selects it, the `SGLANG_SM120_SPARSE_DECODE` / `SGLANG_SM120_SPARSE_PREFILL` attention toggles, and the capture-safe indexer routing.
+- **FlashInfer** [ambientlight/mxfp4-fused-moe](https://github.com/ambientlight/flashinfer/tree/ambientlight/mxfp4-fused-moe) ([#3541](https://github.com/flashinfer-ai/flashinfer/pull/3541), draft) — CuTe-DSL fused-SwiGLU `MmaMXF4Op` MXFP4 MoE kernels + the `sm120_moe_supported_quant_modes()` capability probe.
+- **SGLang** [feat/sm120-mxfp4-w4a4-moe](https://github.com/ambientlight/sglang/tree/feat/sm120-mxfp4-w4a4-moe) — `Mxfp4W4A4MoEMethod` (+ shared E8M0 swizzle), the `fp8.py` feature-probe that auto-selects it, the `SGLANG_SM120_SPARSE_DECODE` / `SGLANG_SM120_SPARSE_PREFILL` attention toggles, and the capture-safe indexer routing.
 - [sparse_decode_kernel.cuh](https://github.com/ambientlight/deepseek-v4-flash-sm120/blob/feat/hmma-tensor-core-sparse-decode/csrc/sm120/decode/sparse_decode_kernel.cuh) + [parse_prefill_kernel.cuh](https://github.com/ambientlight/deepseek-v4-flash-sm120/blob/feat/hmma-tensor-core-sparse-decode/csrc/sm120/prefill/sparse_prefill_kernel.cuh) HMMA kernels from [OxSero/deepseek-v4-flash-sm120 fork](https://github.com/ambientlight/deepseek-v4-flash-sm120) that was built against during the hillclimb. Both use warp-level `mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32`. (SM120 has no `wgmma` (SM90) or `tcgen05` (SM100)).
 
 ---
