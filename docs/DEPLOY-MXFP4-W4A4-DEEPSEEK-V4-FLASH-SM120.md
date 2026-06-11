@@ -1,7 +1,7 @@
 # DeepSeek-V4-Flash — Native MXFP4 W4A4 on SM120
 
-Recipe for serving [DeepSeek-V4-Flash](https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash) with **native MXFP4×MXFP4 (W4A4)** fused and custom **HMMA tensor-core sparse-decode** kernel on **4× RTX PRO 6000 Blackwell
-(SM120, TP=4)**. This wires together three forks — FlashInfer (MXFP4 kernels), SGLang (serving), and the custom HMMA `.so` (decode attention).
+Recipe for serving [DeepSeek-V4-Flash](https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash) with **native MXFP4×MXFP4 (W4A4)** fused MoE and custom **HMMA tensor-core sparse-attention** kernels — on **4× RTX PRO 6000 Blackwell
+(SM120, TP=4)**. This wires together three forks — [flashinfer](https://github.com/ambientlight/flashinfer/tree/ambientlight/mxfp4-fused-moe) (MXFP4 kernels), [sglang](https://github.com/ambientlight/sglang/tree/feat/sm120-mxfp4-w4a4-moe) (serving), and custom [sparse_decode_kernel.cuh](https://github.com/ambientlight/deepseek-v4-flash-sm120/blob/feat/hmma-tensor-core-sparse-decode/csrc/sm120/decode/sparse_decode_kernel.cuh) + [parse_prefill_kernel.cuh](https://github.com/ambientlight/deepseek-v4-flash-sm120/blob/feat/hmma-tensor-core-sparse-decode/csrc/sm120/prefill/sparse_prefill_kernel.cuh) HMMA kernels from [deepseek-v4-flash-sm120](https://github.com/ambientlight/deepseek-v4-flash-sm120) as a drop-in replacement to DSv4 stock FlashMLA kernels unavailable for SM120.
 
 **Bench:** 72 tok/s decode @ single seq, 588 tok/s @ 16 conc, ~41 GB/GPU weights, original [deepseek-ai/DeepSeek-V4-Flash](https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash) checkpoint.
 
@@ -26,8 +26,8 @@ Recipe for serving [DeepSeek-V4-Flash](https://huggingface.co/deepseek-ai/DeepSe
 | flashinfer-cubin | 0.6.12 | pulled by sglang's pin; the fork's python tolerates it |
 | transformers | 5.8.1 | needs `deepseek_v4` |
 | sgl-kernel | 0.4.3 | pulled by sglang; SM120 path uses no new API |
-| sglang | fork [`feat/sm120-mxfp4-w4a4-moe`](https://github.com/ambientlight/sglang/tree/feat/sm120-mxfp4-w4a4-moe) | `ambientlight/sglang`; MXFP4 W4A4 method + feature-probe + decode toggle |
-| deepseek_v4_kernel (HMMA) | fork [`feat/hmma-tensor-core-sparse-decode`](https://github.com/ambientlight/deepseek-v4-flash-sm120/tree/feat/hmma-tensor-core-sparse-decode) | `ambientlight/deepseek-v4-flash-sm120`; custom sparse-decode `.so` |
+| sglang | fork [`feat/sm120-mxfp4-w4a4-moe`](https://github.com/ambientlight/sglang/tree/feat/sm120-mxfp4-w4a4-moe) | `ambientlight/sglang`; MXFP4 W4A4 method + feature-probe + decode & prefill toggles |
+| deepseek_v4_kernel (HMMA) | fork [`feat/hmma-tensor-core-sparse-decode`](https://github.com/ambientlight/deepseek-v4-flash-sm120/tree/feat/hmma-tensor-core-sparse-decode) | custom [sparse_decode_kernel.cuh](https://github.com/ambientlight/deepseek-v4-flash-sm120/blob/feat/hmma-tensor-core-sparse-decode/csrc/sm120/decode/sparse_decode_kernel.cuh) + [parse_prefill_kernel.cuh](https://github.com/ambientlight/deepseek-v4-flash-sm120/blob/feat/hmma-tensor-core-sparse-decode/csrc/sm120/prefill/sparse_prefill_kernel.cuh) |
 
 ---
 
@@ -38,25 +38,16 @@ Needs CUDA 12.8+ on `PATH` (host `nvcc` builds the HMMA kernel for `sm_120a`; th
 ```bash
 python3.12 -m venv ~/.venvs/dsv4 && source ~/.venvs/dsv4/bin/activate
 pip install torch==2.11.0+cu130 --index-url https://download.pytorch.org/whl/cu130
-
-# flashinfer: base+cubin wheels, then the MXFP4 fork over the top
 pip install "flashinfer-python==0.6.11.post3" "flashinfer-cubin==0.6.11.post3"
 pip install --no-deps --force-reinstall "git+https://github.com/ambientlight/flashinfer.git@ambientlight/mxfp4-fused-moe"
-
-# sglang fork (python/ subdir). --no-build-isolation skips the Rust gRPC ext (unused here).
-# Pull sglang's runtime deps, then re-pin the flashinfer fork on top (stock sglang pins
-# flashinfer 0.6.12 and would otherwise clobber the fork). torch stays 2.11.0+cu130.
 pip install --no-build-isolation "transformers==5.8.1" \
   "git+https://github.com/ambientlight/sglang.git@feat/sm120-mxfp4-w4a4-moe#subdirectory=python"
 pip install --no-deps --force-reinstall "git+https://github.com/ambientlight/flashinfer.git@ambientlight/mxfp4-fused-moe"
-
-# HMMA kernel — local CUDA build against this venv's torch (cu130). pip install -e
-# makes it an importable package (no PYTHONPATH needed).
 git clone -b feat/hmma-tensor-core-sparse-decode https://github.com/ambientlight/deepseek-v4-flash-sm120.git
 pip install -e deepseek-v4-flash-sm120 --no-deps --no-build-isolation
 
-# RTX PRO 6000 tuned W8A8 + MoE kernel configs (from the HMMA repo). Without these
-# sglang falls back to default tiles (the "Using default W8A8 ... sub-optimal" warning).
+# RTX PRO 6000 tuned W8A8 + MoE kernel configs (from the HMMA repo)
+# Without these sglang falls back to default tiles (the "Using default W8A8 ... sub-optimal" warning).
 SGL=$(python -c "import os,sglang;print(os.path.dirname(sglang.__file__))")
 cp deepseek-v4-flash-sm120/tuned-configs/w8a8/*.json "$SGL/srt/layers/quantization/configs/"
 cp deepseek-v4-flash-sm120/tuned-configs/moe/*.json  "$SGL/srt/layers/moe/moe_runner/triton_utils/configs/"
@@ -68,17 +59,16 @@ cp deepseek-v4-flash-sm120/tuned-configs/moe/*.json  "$SGL/srt/layers/moe/moe_ru
 export FLASHINFER_DISABLE_VERSION_CHECK=1
 python -c "from flashinfer.fused_moe.cute_dsl.blackwell_sm12x import sm120_moe_supported_quant_modes as f; assert 'mxfp4' in f(); print('flashinfer mxfp4 OK')"
 python -c "from sglang.srt.layers.quantization.mxfp4_w4a4_moe import Mxfp4W4A4MoEMethod; print('sglang method OK')"
-python -c "from deepseek_v4_kernel.ops import sparse_decode_fwd; print('hmma kernel OK')"
+python -c "from deepseek_v4_kernel.ops import sparse_decode_fwd, sparse_prefill_fwd; print('hmma decode + prefill kernels OK')"
 ```
 
-### What this adds over stock SGLang
+### Additions
 
-Three forks, all SM120-only and gated — stock paths (NVFP4 / SM90-CUTLASS / DeepGEMM / Triton) are
-untouched:
+Three forks, all gated SM120-only:
 
 - **FlashInfer** `ambientlight/mxfp4-fused-moe` ([#3541](https://github.com/flashinfer-ai/flashinfer/pull/3541), draft) — CuTe-DSL fused-SwiGLU `MmaMXF4Op` MXFP4 MoE kernels + the `sm120_moe_supported_quant_modes()` capability probe.
-- **SGLang** `feat/sm120-mxfp4-w4a4-moe` — `Mxfp4W4A4MoEMethod` (+ shared E8M0 swizzle), the `fp8.py` feature-probe that auto-selects it, the `SGLANG_SM120_SPARSE_DECODE` decode toggle, and the capture-safe indexer routing.
-- **HMMA** `feat/hmma-tensor-core-sparse-decode` — tensor-core `sparse_decode_fwd` `.so`, a drop-in for FlashMLA. required for the throughput here: the in-tree Triton fallback is ~6–14× slower
+- **SGLang** `feat/sm120-mxfp4-w4a4-moe` — `Mxfp4W4A4MoEMethod` (+ shared E8M0 swizzle), the `fp8.py` feature-probe that auto-selects it, the `SGLANG_SM120_SPARSE_DECODE` / `SGLANG_SM120_SPARSE_PREFILL` attention toggles, and the capture-safe indexer routing.
+- [sparse_decode_kernel.cuh](https://github.com/ambientlight/deepseek-v4-flash-sm120/blob/feat/hmma-tensor-core-sparse-decode/csrc/sm120/decode/sparse_decode_kernel.cuh) + [parse_prefill_kernel.cuh](https://github.com/ambientlight/deepseek-v4-flash-sm120/blob/feat/hmma-tensor-core-sparse-decode/csrc/sm120/prefill/sparse_prefill_kernel.cuh) HMMA kernels from [OxSero/deepseek-v4-flash-sm120 fork](https://github.com/ambientlight/deepseek-v4-flash-sm120) that was built against during the hillclimb. Both use warp-level `mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32`. (SM120 has no `wgmma` (SM90) or `tcgen05` (SM100)).
 
 ---
 
@@ -92,7 +82,8 @@ source ~/.venvs/dsv4/bin/activate
 # needed. The version guard is required (flashinfer-cubin 0.6.12 vs fork 0.6.13).
 
 # --- selection ---
-export SGLANG_SM120_SPARSE_DECODE=hmma          # decode attention: hmma | triton | torch
+export SGLANG_SM120_SPARSE_DECODE=hmma           # sparse attention, default path (decode + prefill <= 11673 tok)
+export SGLANG_SM120_SPARSE_PREFILL=hmma           # sparse attention, large-batch path (prefill > 11673 tok)
 #   MoE method auto-selects via the FlashInfer feature-probe — NO SGLANG_MXFP4_W4A4 env var.
 
 # SM120+DeepseekV4 auto-sets FP8_WO_A_GEMM, USE_TOPK_V2, TILELANG_MHC_PRE,
@@ -144,9 +135,13 @@ Startup ~2 min (weight load + CUDA-graph capture; capture pool ~4.2 GB).
       |     FlashInfer fork: launch_sm120_moe(quant_mode="mxfp4")   [LAYER 1]
       |       CuTe-DSL fused SwiGLU MmaMXF4Op, E8M0 self-scaling
       |
-      +-- Decode attention (FlashMLA sparse decode)
-      |     flash_mla_sm120.py, SGLANG_SM120_SPARSE_DECODE in {hmma, triton, torch}
-      |       hmma   -> deepseek_v4_kernel.ops.sparse_decode_fwd (.so)  [LAYER 3, our custom]
+      +-- Sparse attention (per-token top-k; prefill and decode are one op)
+      |     default — decode + prefill <= 11673 tok (reads paged FP8):
+      |       flash_mla_sm120.py, SGLANG_SM120_SPARSE_DECODE=hmma
+      |         -> deepseek_v4_kernel.ops.sparse_decode_fwd (.so)  [LAYER 3, our custom]
+      |     large-batch — prefill > 11673 tok (reads pre-staged flat bf16):
+      |       flash_mla_sparse_prefill_sm120.py, SGLANG_SM120_SPARSE_PREFILL=hmma
+      |         -> deepseek_v4_kernel.ops.sparse_prefill_fwd (.so)  [LAYER 3, our custom]
       |
       +-- Indexer (tilelang FP8 paged-MQA-logits)
             indexer.py: is_sm120_supported() -> capture-safe dsv4/ kernel
@@ -167,17 +162,14 @@ FlashInfer (no fork) the set lacks `mxfp4`, the probe is False, and SGLang silen
 Triton MoE fallback. Installing Layer 1 flips it True — that is the entire activation
 mechanism. Confirm with the install block's L1 probe one-liner.
 
-### Sparse decode — single env var, three backends
-
-`flash_mla_sm120.py` resolves `SGLANG_SM120_SPARSE_DECODE` once at import at [layers/attention/flash_mla_sm120.py#L211](https://github.com/ambientlight/sglang/blob/e1ca8d9672d8ef2efe7b97c21d572e702054ee98/python/sglang/srt/layers/attention/flash_mla_sm120.py#L211)
-
 ---
 
 ## Environment variable reference
 
 | Variable | Value | Why |
 |---|---|---|
-| `SGLANG_SM120_SPARSE_DECODE` | `hmma` | Decode-attention backend; `hmma` needs Layer 3, else falls back to `triton` |
+| `SGLANG_SM120_SPARSE_DECODE` | `hmma` | Sparse-attention default path (decode + prefill ≤ 11673 tok) |
+| `SGLANG_SM120_SPARSE_PREFILL` | `hmma` | Sparse-attention large-batch path (prefill > 11673 tok). Required on SM120 — the stock kernel is SM90a/SM100f-only and raises here |
 | `FLASHINFER_DISABLE_VERSION_CHECK` | `1` | fork flashinfer-python 0.6.13 vs cubin 0.6.12 |
 | `SGLANG_SKIP_SGL_KERNEL_VERSION_CHECK` | `1` | only if the venv's sgl-kernel lags the branch's request; our path uses no new API |
 | `SGLANG_OPT_USE_TILELANG_INDEXER` | `1` | Fast FP8 paged-MQA-logits indexer; SM120 routing fix sends it to the capture-safe `dsv4/` kernel |
@@ -213,10 +205,10 @@ native FP4 weights (~41 GB/GPU). (Triton row from a prior run, not re-measured t
 
 ## End-to-end pipeline (MXFP4 W4A4 decode, 1 token)
 
-Blocks marked `*` differ from the FP8 path. Only the **MoE FFN expert GEMM** is MXFP4 W4A4; everything
-else (embedding, MQA attention + C4 indexer + sparse decode, dense FFN, LM head, sampling) is identical
-to the FP8/NVFP4 paths. The sparse-decode block is the one selected by `SGLANG_SM120_SPARSE_DECODE`
-(`hmma` shown; `triton`/`torch` swap only that line).
+Blocks marked `*` differ from the FP8 path. Only the **MoE FFN expert GEMM** is MXFP4 W4A4; For a single decode token the **default sparse-attention path** runs (selected by
+`SGLANG_SM120_SPARSE_DECODE`; `hmma` shown). The **large-batch path** below it (`SGLANG_SM120_SPARSE_PREFILL`)
+is the *same attention op* with KV pre-staged to flat bf16 — it fires only on the extend path when a prefill
+batch exceeds 11673 query tokens, never for a decode token.
 
 ```
 TOKEN IN
@@ -247,10 +239,17 @@ TOKEN IN
 |  |   fp8_paged_mqa_logits (SM120: dsv4/)  [TileLang]              |   |
 |  |   topk_transform_512                   [Triton]                |   |
 |  |                                                                |   |
-|  | Sparse Decode (SGLANG_SM120_SPARSE_DECODE):                    |   |
+|  | SPARSE ATTENTION — per-token top-k gather                      |   |
+|  | (no causal mask,   prefill and decode are the SAME op;         |   |
+|  |                    routed by query-batch size, not "phase"):   |   |
+|  |                                                                |   |
+|  | Default path — decode AND prefill <= 11673 tok                 |   |
+|  |   (paged-FP8 KV read directly; SGLANG_SM120_SPARSE_DECODE):    |   |
 |  |   hmma  -> sparse_decode_fwd      [HMMA custom .so] *          |   |
-|  |   triton-> flash_mla_sm120_triton [Triton in-tree]             |   |
-|  |   torch -> _sm120_sparse_decode   [Torch fallback]             |   |
+|  |                                                                |   |
+|  | Large-batch path — prefill > 11673 tok (same math, KV pre-     |   |
+|  |   staged to flat bf16; SGLANG_SM120_SPARSE_PREFILL):           |   |
+|  |   hmma  -> sparse_prefill_fwd     [HMMA custom .so] *          |   |
 |  |                                                                |   |
 |  | Output:                                                        |   |
 |  |   wo_a FP8 einsum                      [DeepGEMM]              |   |
