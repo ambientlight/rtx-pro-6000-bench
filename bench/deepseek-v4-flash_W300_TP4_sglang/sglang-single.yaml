@@ -1,0 +1,56 @@
+# DeepSeek-V4-Flash — single-concurrency long-context (→1M) scaling test (sm_120)
+# Variant of sglang.yaml for the prefill/decode-vs-prompt-length sweep:
+#   * full native 1,048,576 context (vs 131072 in the throughput config)
+#   * mem-fraction-static 0.80, chunked-prefill-size 8192 (long-context indexer headroom)
+#   * max-running-requests 1 (we drive concurrency=1)
+# Engine: sglang fork ambientlight/feat/sm120-mxfp4-w4a4-moe
+# Launch via launch-single.sh (sets the SM120 env the yaml can't).
+
+model-path: /mnt/hot/ambientlight/models/DeepSeek-V4-Flash
+served-model-name: deepseek-v4-flash
+host: 0.0.0.0
+port: 8000
+trust-remote-code: true
+
+# Parallelism
+tensor-parallel-size: 4
+pipeline-parallel-size: 1
+
+# Context & scheduling — FULL 1M context for the long-prompt scaling test.
+# Largest point is 1,047,552-in + 1,024-out = 1,048,576 (fits exactly).
+# chunked-prefill-size 8192: the C4 indexer allocates a dense
+# [pending_tokens, max_seq_len] fp32 logits buffer per prefill step (chunk 16384
+# OOM'd at >=256K). chunk 4096 ran the full 2K->1M sweep at ~84% peak GPU mem;
+# 8192 doubles the buffer (~16 GiB at 1M) for fewer prefill steps / faster TTFT,
+# trading some of that headroom back.
+context-length: 1048576
+max-running-requests: 1
+chunked-prefill-size: 8192
+page-size: 256
+
+# Quantization (native MXFP4 experts, feature-probe-selected; no quantization flag needed)
+kv-cache-dtype: fp8_e4m3
+
+# Memory — 0.80: the binding constraint at long context is NOT the static KV pool
+# but the indexer's transient logits buffer, drawn from the *runtime* pool
+# (everything left after mem-fraction-static). 0.90/0.85 OOM'd at 256K; 0.75 +
+# chunk 4096 cleared the full 1M at ~84% peak. 0.80 + chunk 8192 shifts a little
+# back to the static pool — still within the prior headroom, but 1M is the cell
+# that tests it.
+mem-fraction-static: 0.80
+
+# Backends (sm_120 Blackwell workstation)
+moe-runner-backend: triton
+dsa-topk-backend: torch
+
+# CUDA graphs — capture only bs=1 (max-running-requests); the sweep drives c1.
+cuda-graph-max-bs: 1
+cuda-graph-bs: [1]
+disable-custom-all-reduce: true
+disable-shared-experts-fusion: true
+
+# Metrics (REQUIRED for bench_sweep telemetry)
+enable-metrics: true
+
+watchdog-timeout: 3600
+log-level: info

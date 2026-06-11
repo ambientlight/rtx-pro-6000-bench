@@ -3,7 +3,10 @@
 Recipe for serving [DeepSeek-V4-Flash](https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash) with **native MXFP4×MXFP4 (W4A4)** fused MoE and custom **HMMA tensor-core sparse-attention** kernels — on **4× RTX PRO 6000 Blackwell
 (SM120, TP=4)**. This wires together three forks — [flashinfer](https://github.com/ambientlight/flashinfer/tree/ambientlight/mxfp4-fused-moe) (MXFP4 kernels), [sglang](https://github.com/ambientlight/sglang/tree/feat/sm120-mxfp4-w4a4-moe) (serving), and custom [sparse_decode_kernel.cuh](https://github.com/ambientlight/deepseek-v4-flash-sm120/blob/feat/hmma-tensor-core-sparse-decode/csrc/sm120/decode/sparse_decode_kernel.cuh) + [sparse_prefill_kernel.cuh](https://github.com/ambientlight/deepseek-v4-flash-sm120/blob/feat/hmma-tensor-core-sparse-decode/csrc/sm120/prefill/sparse_prefill_kernel.cuh) HMMA kernels from [deepseek-v4-flash-sm120](https://github.com/ambientlight/deepseek-v4-flash-sm120) as a drop-in replacement to DSv4 stock FlashMLA kernels unavailable for SM120.
 
-**Bench:** 72 tok/s decode @ single seq, 588 tok/s @ 16 conc, ~41 GB/GPU weights, original [deepseek-ai/DeepSeek-V4-Flash](https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash) checkpoint.
+**Benchmark** ([`bench_sweep.log`](https://github.com/ambientlight/rtx-pro-6000-bench/blob/main/bench/deepseek-v4-flash_W300_TP4_sglang/bench_sweep.log)
+in [`bench/deepseek-v4-flash_W300_TP4_sglang/`](https://github.com/ambientlight/rtx-pro-6000-bench/tree/main/bench/deepseek-v4-flash_W300_TP4_sglang)):
+full 2K–64K × concurrency sweep at W300/TP4 — **8576/8576 requests, 0 failed over ~27 h continuous load**.
+Best sustained output 756 tok/s @ 2K (c64); see [Performance](#performance).
 
 ---
 
@@ -108,17 +111,17 @@ python -m sglang.launch_server \
   --served-model-name deepseek-v4-flash \
   --tp 4 --trust-remote-code --host 0.0.0.0 --port 8000 \
   --context-length 1048576 --mem-fraction-static 0.80 \
-  --max-running-requests 16 \
+  --max-running-requests 128 \
   --kv-cache-dtype fp8_e4m3 \
   --moe-runner-backend triton \
   --chunked-prefill-size 16384 --page-size 256 \
-  --cuda-graph-max-bs 16 --cuda-graph-bs 1 2 4 8 16 \
+  --cuda-graph-max-bs 128 --cuda-graph-bs 1 2 4 8 16 32 64 128 \
   --disable-custom-all-reduce --disable-shared-experts-fusion \
   --dsa-topk-backend torch \
   --watchdog-timeout 3600 --log-level info
 ```
 
-Startup ~2 min (weight load + CUDA-graph capture; capture pool ~4.2 GB).
+Startup ~5 min (weight load + CUDA-graph capture across the bs 1…128 ladder).
 
 ---
 
@@ -183,19 +186,65 @@ mechanism. Confirm with the install block's L1 probe one-liner.
 
 ## Performance
 
-DeepSeek-V4-Flash decode tok/s, 4× RTX PRO 6000 Max-Q, TP=4, CUDA graphs on, MXFP4 fused MoE:
+Full 2K–64K × concurrency sweep, W300 / TP4, output 1024, 128 prompts/run — **67 cells, 8576 / 8576
+requests succeeded, 0 failed** over ~27 h of continuous load. All numbers below are sustained
+(run-duration mean `output_throughput`), from
+[`bench_sweep.log`](../bench/deepseek-v4-flash_W300_TP4_sglang/bench_sweep.log)
+in [`../bench/deepseek-v4-flash_W300_TP4_sglang/`](../bench/deepseek-v4-flash_W300_TP4_sglang).
 
-`bench_serving` output token throughput (sustained), random 256-in/512-out:
+Best sustained output throughput per input length (and the telemetry at that cell):
 
-| Concurrency | 1 | 4 | 8 | 16 |
-|---|---:|---:|---:|---:|
-| **HMMA sparse decode** | **72** | **213** | **351** | **588** |
-| Triton sparse decode | 13 | 37 | 49 | 54 |
-| HMMA speedup | 5.5× | 5.8× | 7.2× | 10.9× |
+| Input | Sustained tok/s | @ conc | Mean power | KV peak |
+|---|---:|:---:|---:|---:|
+| 2,048 | **756** | c64 | 1,009 W | 80% |
+| 4,096 | **444** | c32 | 1,009 W | 69% |
+| 8,192 | **263** | c40 | 984 W | 100% |
+| 16,384 | **163** | c104 | 931 W | 100% |
+| 32,768 | **79** | c40 | 914 W | 100% |
+| 65,536 | **40** | c16 | 919 W | 100% |
 
-The MoE kernel is identical across both rows; the only variable is the decode-attention kernel.
-Triton plateaus ~54 tok/s and does not scale with concurrency; HMMA scales to 588 at 16-wide with
-native FP4 weights (~41 GB/GPU). (Triton row from a prior run, not re-measured this session.)
+Single-user (c1) by prompt length — TTFT scales with prefill cost; TPOT stays ~17–24 ms (decode is the
+prompt-independent sparse top-k), so single-stream throughput tapers as KV grows:
+
+| Input | TTFT p50 | TPOT p50 | Output tok/s |
+|---|---:|---:|---:|
+| 2,048 | 604 ms | 16.8 ms | 57.6 |
+| 8,192 | 2,653 ms | 17.5 ms | 49.8 |
+| 16,384 | 5,381 ms | 18.5 ms | 42.2 |
+| 32,768 | 11,199 ms | 20.4 ms | 32.0 |
+| 65,536 | 23,914 ms | 24.2 ms | 21.0 |
+
+Long-context throughput is gated by sparse-attention gather + KV-cache capacity (the ≥ 8K rows saturate KV
+at 100%, so they peak at low concurrency and queue beyond it — graceful backpressure, not failure).
+Per-input-length charts + per-cell telemetry in the benchmark folder (`plots/`, `telemetry_*.png`); reproduce
+with the matrix sweep in the [repo README](https://github.com/ambientlight/rtx-pro-6000-bench).
+
+### Long-context scaling to 1M (single stream)
+
+A separate single-concurrency sweep (config: `sglang-single.yaml` — full **1,048,576** context,
+`mem-fraction-static 0.80`, `chunked-prefill-size 8192`, `max-running-requests 1`; launch with
+`launch-single.sh` + `sweep-single.sh`) doubles the prompt 2K → **1,047,552** (= 1M − 1024, filling the native
+context exactly), one prompt per length, output 1024. **All 10 lengths completed, including the full 1M
+prompt.** Numbers from
+[`bench_sweep_single.chunk8192.log`](https://github.com/ambientlight/rtx-pro-6000-bench/blob/main/bench/deepseek-v4-flash_W300_TP4_sglang/bench_sweep_single.chunk8192.log):
+
+| Input | TTFT (prefill) | TPOT (decode) | Output tok/s | Peak VRAM/GPU | KV |
+|------:|:--------------:|:-------------:|:------------:|:-------------:|:--:|
+| 2,048 | 0.19 s | 16.8 ms | 58.8 | 85% | 1% |
+| 8,192 | 0.23 s | 17.5 ms | 56.3 | 85% | 2% |
+| 32,768 | 0.32 s | 20.4 ms | 48.3 | 87% | 7% |
+| 131,072 | 0.85 s | 31.8 ms | 30.7 | 87% | 7% |
+| 262,144 | 1.60 s | 46.9 ms | 20.7 | 88% | 12% |
+| 524,288 | 3.29 s | 77.3 ms | 12.4 | 90% | 23% |
+| **1,047,552** | **6.73 s** | **137.6 ms** | **6.9** | **95%** | **47%** |
+
+TTFT scales **sub-linearly** (0.19 → 6.73 s for 512× the tokens — the sparse-prefill kernel) and TPOT ~8×
+(16.8 → 137.6 ms, the per-step sparse gather over a growing KV workspace). The 1M prompt peaks at **95%
+VRAM/GPU** (364 GB of 4×96 GB) — and notably **KV is only 47%**: the binding constraint at extreme context is
+the C4 indexer's transient per-chunk logits buffer, not the KV pool. That is why `chunked-prefill-size` and
+`mem-fraction-static` (not just context length) gate how far you scale: a larger chunk doubles that buffer.
+**0.80 / chunk 8192 is the config that runs both this 1M single-stream sweep and the full concurrency sweep
+above healthily** — it's the headroom threshold on 4×96 GB.
 
 ---
 

@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
-# Launch DeepSeek-V4-Flash (MXFP4 W4A4 + HMMA sparse decode) for bench_sweep.
-# Canonical deployment: docs/DEPLOY-MXFP4-W4A4-DEEPSEEK-V4-FLASH-SM120.md
-# Wait for /v1/models before running bench-sweep. Startup ~2 min (weight load + graph capture).
+# Launch DeepSeek-V4-Flash for the SINGLE-CONCURRENCY long-context (->1M) scaling
+# test (sglang-single.yaml: full 1M context, mem 0.90, max-running-requests 8).
+# Same SM120 env as launch.sh. Wait for /v1/models, then run sweep-single.sh.
 set -euo pipefail
 
 source ~/.venvs/dsv4-test/bin/activate
 
 # Selection
-export SGLANG_SM120_SPARSE_DECODE=hmma           # HMMA tensor-core sparse decode (else triton)
+export SGLANG_SM120_SPARSE_DECODE=hmma           # HMMA tensor-core sparse decode
 export SGLANG_SM120_SPARSE_PREFILL=hmma           # HMMA tensor-core sparse prefill (> 11673-token batches)
 
 # SM120 path (SM120+DeepseekV4 auto-sets FP8_WO_A_GEMM, USE_TOPK_V2, TILELANG_MHC_PRE,
@@ -29,14 +29,12 @@ export CUDA_VISIBLE_DEVICES=0,1,2,3
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# GPU coredump on device exception. Captures the faulting kernel of any
-# single-rank device-side fault that otherwise dies without a traceback. Dump is
-# backtrace/PC/registers only (skip_*_memory), so it stays a few MB, not 96 GB.
-# Read with:  cuda-gdb python <CUDA_COREDUMP_FILE>
+# GPU coredump on device exception (backtrace-only, ~few MB). Read with:
+#   cuda-gdb python <CUDA_COREDUMP_FILE>
 export CUDA_ENABLE_COREDUMP_ON_EXCEPTION=1
 export CUDA_ENABLE_USER_TRIGGERED_COREDUMP=1
 export CUDA_COREDUMP_SHOW_PROGRESS=1
 export CUDA_COREDUMP_GENERATION_FLAGS="skip_global_memory,skip_shared_memory,skip_local_memory"
 export CUDA_COREDUMP_FILE="$HERE/cudacore.%h.%p"
 
-exec python -m sglang.launch_server --config "$HERE/sglang.yaml"
+exec python -m sglang.launch_server --config "$HERE/sglang-single.yaml"

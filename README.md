@@ -18,13 +18,42 @@ Benchmark sweep harness for local model inference (SM120). Sweeps concurrency le
 | **Qwen3.5-397B-A17B** | MoE | 397B / 17B | 131,072 | vLLM | |
 | **MiniMax-M2.5** | MoE | 230B / 10B | 196,608 | vLLM | |
 | **Devstral-2-123B** | Dense | 123B | 262,144 | vLLM | torch.compile mode 3, CUDAGraphs, fuse_act_quant=false (sm_120) |
-| **DeepSeek-V4-Flash** | MoE (MLA + sparse) | 284B / 13B | 1,048,576 | sglang | native MXFP4 W4A4 experts + HMMA tensor-core sparse decode (sm_120); TP4 |
+| **DeepSeek-V4-Flash** | MoE (MLA + sparse) | 284B / 13B | 1,048,576 | sglang | native MXFP4 W4A4 experts + HMMA tensor-core sparse decode **and** prefill (sm_120); TP4 |
 
-All vLLM models: `tensor_parallel_size: 4`, `gpu_memory_utilization: 0.90`, `kv_cache_dtype: fp8_e4m3`, `enable_chunked_prefill: true`, `max_num_seqs: 128`, `max_num_batched_tokens: 65536`
+All vLLM models: `tensor_parallel_size: 4`, `gpu_memory_utilization: 0.90`, `kv_cache_dtype: fp8_e4m3`, `enable_chunked_prefill: true`, `max_num_seqs: 128`, `max_num_batched_tokens: 65536`. DeepSeek-V4-Flash (sglang): `tp 4`, `mem-fraction-static 0.80`, `kv-cache-dtype fp8_e4m3`, `max-running-requests 128`, `chunked-prefill-size 16384`.
 
 ## Results Summary
 
 **Test parameters**: 128 random prompts per run, 1024 output tokens, input lengths from 2K to 64K.
+
+### W300 / TP4: Qwen3.5-397B vs DeepSeek-V4-Flash
+
+The two models swept at **300W, TP4** on this box (same `--output-len 1024 --step-size 8` matrix). Different
+families and stacks — Qwen3.5-397B-A17B (NVFP4, vLLM) vs DeepSeek-V4-Flash (native MXFP4 W4A4 + MLA/sparse
+attention, sglang) — so this is a "what runs at W300/TP4 here", not really direct apples-to-apples comparison.
+
+#### Peak Output Throughput (tok/s)
+
+| Input Length | Qwen3.5-397B-A17B (NVFP4, vLLM) | DeepSeek-V4-Flash (MXFP4, sglang) |
+|:------------:|:-------------------------------:|:---------------------------------:|
+| 2,048 | **1,124** @c64 | 756 @c64 |
+| 4,096 | **908** @c64 | 444 @c32 |
+| 8,192 | **649** @c72 | 263 @c40 |
+| 16,384 | **387** @c48 | 163 @c104 |
+| 32,768 | **212** @c32 | 79 @c40 |
+| 65,536 | **102** @c16 | 40 @c16 |
+
+#### Single-User (concurrency=1, 2K input)
+
+| Metric | Qwen3.5-397B-A17B | DeepSeek-V4-Flash |
+|--------|:-----------------:|:-----------------:|
+| TTFT p50 | **255 ms** | 604 ms |
+| TPOT p50 | **11.3 ms** | 16.8 ms |
+| Output throughput | **86.4 tok/s** | 57.6 tok/s |
+| Mean power @ 2K peak | 1,062 W | **1,009 W** |
+
+Qwen leads on raw throughput/latency; DeepSeek-V4-Flash is the larger-context (1M) MLA+sparse model and the
+only one here on native MXFP4 W4A4 + a custom SM120 attention stack. Per-model detail below.
 
 ### Peak Output Throughput at 250W (tok/s)
 
@@ -50,6 +79,81 @@ All vLLM models: `tensor_parallel_size: 4`, `gpu_memory_utilization: 0.90`, `kv_
 | Output throughput (mean) | **85.4 tok/s** | 83.0 tok/s | 29.6 tok/s |
 | Output throughput (peak) | **89.0 tok/s** | 86.0 tok/s | 32.0 tok/s |
 
+### DeepSeek-V4-Flash (W300, sglang, native MXFP4 W4A4 + HMMA sparse attention)
+
+Reported separately: different engine (sglang), quantization (native MXFP4 W4A4 MoE), and power cap (W300).
+Full 2K–64K × concurrency sweep, **8576/8576 requests succeeded, 0 failed** — including the >11673-token
+prefill batches that crash stock sgl-kernel on SM120 (the gap the HMMA sparse-prefill kernel closes). Setup +
+kernel details: [docs/DEPLOY-MXFP4-W4A4-DEEPSEEK-V4-FLASH-SM120.md](docs/DEPLOY-MXFP4-W4A4-DEEPSEEK-V4-FLASH-SM120.md).
+
+#### Peak Output Throughput at 300W (tok/s)
+
+| Input Length | Peak tok/s | @ concurrency | Mean system power |
+|:------------:|:----------:|:-------------:|:-----------------:|
+| 2,048 | **756** | c64 | 1,009 W |
+| 4,096 | **444** | c32 | 1,009 W |
+| 8,192 | **263** | c40 | 984 W |
+| 16,384 | **163** | c104 | 931 W |
+| 32,768 | **79** | c40 | 914 W |
+| 65,536 | **40** | c16 | 919 W |
+
+#### Single-User Latency (concurrency=1, by prompt length)
+
+| Input Length | TTFT p50 | TTFT p99 | TPOT p50 | Output tok/s | E2E p50 (s) |
+|:------------:|:--------:|:--------:|:--------:|:------------:|:-----------:|
+| 2,048 | 604 ms | 819 ms | 16.8 ms | 57.6 | 17.8 |
+| 4,096 | 1,285 ms | 1,451 ms | 17.0 ms | 55.0 | 18.6 |
+| 8,192 | 2,653 ms | 2,725 ms | 17.5 ms | 49.8 | 20.6 |
+| 16,384 | 5,381 ms | 5,428 ms | 18.5 ms | 42.2 | 24.3 |
+| 32,768 | 11,199 ms | 11,238 ms | 20.4 ms | 32.0 | 32.1 |
+| 65,536 | 23,914 ms | 24,697 ms | 24.2 ms | 21.0 | 48.6 |
+
+TTFT scales with prompt length (prefill cost); TPOT stays ~17–24 ms (decode is sparse-attention top-k, near
+prompt-independent), so single-stream output throughput tapers from 58 → 21 tok/s as KV grows.
+
+Per-input-length charts in [bench/deepseek-v4-flash_W300_TP4_sglang/plots/](bench/deepseek-v4-flash_W300_TP4_sglang/plots/);
+peak throughput is decode-bound (TPOT ~17 ms single-user), while long-context throughput is gated by the
+sparse-attention gather + KV-cache capacity (32K/64K saturate KV at 100%, hence early concurrency peaks).
+
+| | |
+|---|---|
+| ![Throughput vs concurrency](bench/deepseek-v4-flash_W300_TP4_sglang/plots/deepseek-v4-flash_compare_W300/compare_throughput_vs_concurrency.png) | ![Peak power](bench/deepseek-v4-flash_W300_TP4_sglang/deepseek-v4-flash_random_2048in_1024out_c64_W300/telemetry_power.png) |
+
+<sub>Left: output throughput vs concurrency across input lengths. Right: system power at peak throughput (756 tok/s @ c64, 2048in/1024out) — ~1,009 W mean, 94% GPU util.</sub>
+
+#### Long-context scaling to 1M (single stream, c1)
+
+A separate single-concurrency sweep doubling the prompt 2K → **1,047,552** (= 1M − 1024, so input+output fills
+the full native 1,048,576 context exactly), one prompt per length, output 1024. Run with `sglang-single.yaml`
+(full 1M context, `mem-fraction-static 0.80`, `chunked-prefill-size 8192`, `max-running-requests 1`). **All 10
+lengths completed, including the full 1M prompt.**
+
+| Input | TTFT (prefill) | TPOT (decode) | Output tok/s | Peak VRAM/GPU | KV |
+|------:|:--------------:|:-------------:|:------------:|:-------------:|:--:|
+| 2,048 | 0.19 s | 16.8 ms | 58.8 | 85% | 1% |
+| 8,192 | 0.23 s | 17.5 ms | 56.3 | 85% | 2% |
+| 32,768 | 0.32 s | 20.4 ms | 48.3 | 87% | 7% |
+| 131,072 | 0.85 s | 31.8 ms | 30.7 | 87% | 7% |
+| 262,144 | 1.60 s | 46.9 ms | 20.7 | 88% | 12% |
+| 524,288 | 3.29 s | 77.3 ms | 12.4 | 90% | 23% |
+| **1,047,552** | **6.73 s** | **137.6 ms** | **6.9** | **95%** | **47%** |
+
+TTFT scales sub-linearly with prompt length (0.19 s → 6.7 s for 512× the tokens — the sparse-prefill kernel);
+TPOT grows ~8× (16.8 → 137.6 ms) as each decode step's sparse gather walks a larger KV workspace. The 1M
+prompt peaks at **95% VRAM/GPU** (364 GB total of 4×96 GB; KV only 47% — the headroom is consumed by the C4
+indexer's transient per-chunk logits buffer, which is why `chunked-prefill-size` and `mem-fraction-static`
+gate the long-context ceiling, not raw KV). 0.80 / chunk 8192 is the config that runs both this 1M sweep and
+the full concurrency sweep above healthily.
+
+| |
+|---|
+| ![1M power](bench/deepseek-v4-flash_W300_TP4_sglang/single/deepseek-v4-flash_random_1047552in_1024out_c1_W300/telemetry_power.png) |
+
+<sub>System power during the 1,047,552-token single-stream run (TTFT 6.7 s prefill, then 1024-token decode at ~7 tok/s; ~858 W mean).</sub>
+
+
+
+
 ## Installation
 
 ```bash
@@ -72,12 +176,12 @@ Launch the server, then sweep with `--tokenizer` pointed at the checkpoint:
 # 1. Start the server (config + env in bench/deepseek-v4-flash_W300_TP4_sglang/)
 bash bench/deepseek-v4-flash_W300_TP4_sglang/launch.sh   # wait for /v1/models (~2 min)
 
-# 2. Matrix sweep (output 512; per-input-len concurrency caps)
+# 2. Matrix sweep (output 1024, step-size 8 → c1,2,4,8,16,24,…,128; matches the vLLM models)
 bench-sweep --matrix --telemetry \
   --model-id deepseek-v4-flash --watt 300 \
   --tokenizer /mnt/hot/ambientlight/models/DeepSeek-V4-Flash \
-  --input-lens 2048,4096,8192,16384,32768,65536 --output-len 512 \
-  --max-concurrency 64,64,64,64,64,64 --num-prompts 128 --max-error-rate 0.1
+  --input-lens 2048,4096,8192,16384,32768,65536 --output-len 1024 \
+  --step-size 8 --num-prompts 128 --max-error-rate 0.1
 ```
 
 The sglang server **must** be launched with `enable_metrics: true` (set in `sglang.yaml`) for telemetry
