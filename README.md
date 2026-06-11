@@ -1,6 +1,6 @@
 # rtx-pro-6000-bench
 
-Benchmark sweep harness for local coding model inference on NVIDIA Blackwell GPUs. Supports vLLM and sglang engines. Sweeps concurrency levels, input/output token lengths, and collects GPU telemetry (power, KV cache, utilization) to produce comparison charts.
+Benchmark sweep harness for local model inference (SM120). Sweeps concurrency levels, input/output token lengths, and collects GPU telemetry (power, KV cache, utilization) to produce comparison charts.
 
 ## Hardware
 
