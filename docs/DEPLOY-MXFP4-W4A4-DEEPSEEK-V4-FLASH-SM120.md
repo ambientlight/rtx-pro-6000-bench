@@ -1,7 +1,7 @@
 # DeepSeek-V4-Flash — Native MXFP4 W4A4 on SM120
 
 Recipe for serving [DeepSeek-V4-Flash](https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash) with **native MXFP4×MXFP4 (W4A4)** fused MoE and custom **HMMA tensor-core sparse-attention** kernels — on **4× RTX PRO 6000 Blackwell
-(SM120, TP=4)**. This wires together three forks — [flashinfer](https://github.com/ambientlight/flashinfer/tree/ambientlight/mxfp4-fused-moe) (MXFP4 kernels), [sglang](https://github.com/ambientlight/sglang/tree/feat/sm120-mxfp4-w4a4-moe) (serving), and custom [sparse_decode_kernel.cuh](https://github.com/ambientlight/deepseek-v4-flash-sm120/blob/feat/hmma-tensor-core-sparse-decode/csrc/sm120/decode/sparse_decode_kernel.cuh) + [parse_prefill_kernel.cuh](https://github.com/ambientlight/deepseek-v4-flash-sm120/blob/feat/hmma-tensor-core-sparse-decode/csrc/sm120/prefill/sparse_prefill_kernel.cuh) HMMA kernels from [deepseek-v4-flash-sm120](https://github.com/ambientlight/deepseek-v4-flash-sm120) as a drop-in replacement to DSv4 stock FlashMLA kernels unavailable for SM120.
+(SM120, TP=4)**. This wires together three forks — [flashinfer](https://github.com/ambientlight/flashinfer/tree/ambientlight/mxfp4-fused-moe) (MXFP4 kernels), [sglang](https://github.com/ambientlight/sglang/tree/feat/sm120-mxfp4-w4a4-moe) (serving), and custom [sparse_decode_kernel.cuh](https://github.com/ambientlight/deepseek-v4-flash-sm120/blob/feat/hmma-tensor-core-sparse-decode/csrc/sm120/decode/sparse_decode_kernel.cuh) + [sparse_prefill_kernel.cuh](https://github.com/ambientlight/deepseek-v4-flash-sm120/blob/feat/hmma-tensor-core-sparse-decode/csrc/sm120/prefill/sparse_prefill_kernel.cuh) HMMA kernels from [deepseek-v4-flash-sm120](https://github.com/ambientlight/deepseek-v4-flash-sm120) as a drop-in replacement to DSv4 stock FlashMLA kernels unavailable for SM120.
 
 **Bench:** 72 tok/s decode @ single seq, 588 tok/s @ 16 conc, ~41 GB/GPU weights, original [deepseek-ai/DeepSeek-V4-Flash](https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash) checkpoint.
 
@@ -27,7 +27,7 @@ Recipe for serving [DeepSeek-V4-Flash](https://huggingface.co/deepseek-ai/DeepSe
 | transformers | 5.8.1 | needs `deepseek_v4` |
 | sgl-kernel | 0.4.3 | pulled by sglang; SM120 path uses no new API |
 | sglang | fork [`feat/sm120-mxfp4-w4a4-moe`](https://github.com/ambientlight/sglang/tree/feat/sm120-mxfp4-w4a4-moe) | MXFP4 W4A4 method + feature-probe + decode & prefill toggles |
-| deepseek_v4_kernel (HMMA) | fork [`feat/hmma-tensor-core-sparse-decode`](https://github.com/ambientlight/deepseek-v4-flash-sm120/tree/feat/hmma-tensor-core-sparse-decode) | custom [sparse_decode_kernel.cuh](https://github.com/ambientlight/deepseek-v4-flash-sm120/blob/feat/hmma-tensor-core-sparse-decode/csrc/sm120/decode/sparse_decode_kernel.cuh) + [parse_prefill_kernel.cuh](https://github.com/ambientlight/deepseek-v4-flash-sm120/blob/feat/hmma-tensor-core-sparse-decode/csrc/sm120/prefill/sparse_prefill_kernel.cuh) |
+| deepseek_v4_kernel (HMMA) | fork [`feat/hmma-tensor-core-sparse-decode`](https://github.com/ambientlight/deepseek-v4-flash-sm120/tree/feat/hmma-tensor-core-sparse-decode) | custom [sparse_decode_kernel.cuh](https://github.com/ambientlight/deepseek-v4-flash-sm120/blob/feat/hmma-tensor-core-sparse-decode/csrc/sm120/decode/sparse_decode_kernel.cuh) + [sparse_prefill_kernel.cuh](https://github.com/ambientlight/deepseek-v4-flash-sm120/blob/feat/hmma-tensor-core-sparse-decode/csrc/sm120/prefill/sparse_prefill_kernel.cuh) |
 
 ---
 
@@ -68,7 +68,7 @@ Three forks, all gated SM120-only:
 
 - **FlashInfer** [ambientlight/mxfp4-fused-moe](https://github.com/ambientlight/flashinfer/tree/ambientlight/mxfp4-fused-moe) ([#3541](https://github.com/flashinfer-ai/flashinfer/pull/3541), draft) — CuTe-DSL fused-SwiGLU `MmaMXF4Op` MXFP4 MoE kernels + the `sm120_moe_supported_quant_modes()` capability probe.
 - **SGLang** [feat/sm120-mxfp4-w4a4-moe](https://github.com/ambientlight/sglang/tree/feat/sm120-mxfp4-w4a4-moe) — `Mxfp4W4A4MoEMethod` (+ shared E8M0 swizzle), the `fp8.py` feature-probe that auto-selects it, the `SGLANG_SM120_SPARSE_DECODE` / `SGLANG_SM120_SPARSE_PREFILL` attention toggles, and the capture-safe indexer routing.
-- [sparse_decode_kernel.cuh](https://github.com/ambientlight/deepseek-v4-flash-sm120/blob/feat/hmma-tensor-core-sparse-decode/csrc/sm120/decode/sparse_decode_kernel.cuh) + [parse_prefill_kernel.cuh](https://github.com/ambientlight/deepseek-v4-flash-sm120/blob/feat/hmma-tensor-core-sparse-decode/csrc/sm120/prefill/sparse_prefill_kernel.cuh) HMMA kernels from [OxSero/deepseek-v4-flash-sm120 fork](https://github.com/ambientlight/deepseek-v4-flash-sm120) that was built against during the hillclimb. Both use warp-level `mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32`. (SM120 has no `wgmma` (SM90) or `tcgen05` (SM100)).
+- [sparse_decode_kernel.cuh](https://github.com/ambientlight/deepseek-v4-flash-sm120/blob/feat/hmma-tensor-core-sparse-decode/csrc/sm120/decode/sparse_decode_kernel.cuh) + [sparse_prefill_kernel.cuh](https://github.com/ambientlight/deepseek-v4-flash-sm120/blob/feat/hmma-tensor-core-sparse-decode/csrc/sm120/prefill/sparse_prefill_kernel.cuh) HMMA kernels from [OxSero/deepseek-v4-flash-sm120 fork](https://github.com/ambientlight/deepseek-v4-flash-sm120) that was built against during the hillclimb. Both use warp-level `mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32`. (SM120 has no `wgmma` (SM90) or `tcgen05` (SM100)).
 
 ---
 
@@ -178,10 +178,6 @@ mechanism. Confirm with the install block's L1 probe one-liner.
 | `SGLANG_OPT_USE_FUSED_HASH_TOPK` | `0` | SM120 dtype mismatch |
 | `PYTORCH_CUDA_ALLOC_CONF` | `expandable_segments:True` | Leaves CUDA-graph-capture headroom; avoids fragmentation OOM |
 | `NCCL_PROTO`/`NCCL_ALGO`/`NCCL_MIN_NCHANNELS`/`NCCL_NTHREADS` | `LL`/`Ring`/`8`/`512` | PCIe allreduce tuning (no NVLink) |
-
-On SM120 + DeepseekV4, `server_args` auto-sets `SGLANG_OPT_FP8_WO_A_GEMM`, `SGLANG_OPT_USE_TOPK_V2`,
-`SGLANG_OPT_USE_TILELANG_MHC_PRE`, `SGLANG_OPT_DEEPGEMM_HC_PRENORM` (→ off) and
-`SGLANG_FP8_PAGED_MQA_LOGITS_TORCH` (→ on) at startup, overriding any export — so they are omitted above.
 
 ---
 
