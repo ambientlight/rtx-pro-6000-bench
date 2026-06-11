@@ -62,7 +62,7 @@ against any OpenAI-compatible endpoint (vLLM **or** sglang). It invokes the benc
 `python -m vllm.entrypoints.cli.main bench serve` (so a stale `vllm` console script doesn't block
 runs); override with `--bench-cmd` if needed.
 
-### sglang engine (DeepSeek-V4-Flash)
+### sglang (DeepSeek-V4-Flash)
 
 DeepSeek-V4-Flash is served by our sglang fork (MXFP4 W4A4 + HMMA sparse decode on sm_120). Full
 setup: [docs/DEPLOY-MXFP4-W4A4-DEEPSEEK-V4-FLASH-SM120.md](docs/DEPLOY-MXFP4-W4A4-DEEPSEEK-V4-FLASH-SM120.md).
