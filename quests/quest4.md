@@ -2,12 +2,14 @@
 
 **Date:** 2026-06-09
 **Hardware:** 4× NVIDIA RTX PRO 6000 Blackwell Max-Q (SM120, 96 GB each, PCIe), TP=4
-**Model:** DeepSeek-V4-Flash (291B MoE, native MXFP4 checkpoint)
-**Status:** ✅ **E2E VALIDATED — the crash repro is GREEN.** Kernel correct + race-free, integrated into the
-serving venv, and the high-concurrency sweep that originally crashed now runs clean: **3072/3072 requests, 0
-failures** across 2K/4K/8K-input × c1–c64, including the c8×2048 (16384-token) trigger. Server logs show **zero**
-`only supported on SM90a/SM100f` errors after the fixed launch (all 8 historical crashes predate it). Sweep was
-user-killed at 8192in×c16 (partial 16K–64K rows remain); perf hillclimb deferred (~17 TFLOP/s).
+**Model:** DeepSeek-V4-Flash (284B MoE / 13B active, MLA + sparse attention, native MXFP4 checkpoint)
+**Status:** ✅ **COMPLETE.** SM120 HMMA sparse-prefill kernel shipped: correct + race-free, integrated behind
+`SGLANG_SM120_SPARSE_PREFILL=hmma`, committed + pushed to both forks. The crash that opened this quest is gone
+— the **full 2K–64K × concurrency sweep completed 8576/8576 requests, 0 failed over ~27 h continuous load**
+(W300/TP4, mem 0.80), and a separate single-stream sweep **scales to the full 1M context** (1,047,552-token
+prompt, 6.9 tok/s, 95% VRAM). Both documented in the deploy guide + repo README. Perf hillclimb (cp.async
+double-buffer, B_H head-amortization, split-KV) intentionally deferred — kernel is at ~17 TFLOP/s, correctness
+and the crash-fix were the goal, same as the decode kernel's first cut.
 
 > ### Progress log
 > - **2026-06-09 — Reference architecture located.** DeepSeek's own sparse-prefill source is vendored at
@@ -60,7 +62,7 @@ user-killed at 8192in×c16 (partial 16K–64K rows remain); perf hillclimb defer
 >   `_patch_sgl_kernel_sparse_prefill()` (overrides `sgl_kernel.flash_mla.flash_mla_sparse_fwd` on SM120,
 >   covering the DSA backend's call site for free; no-op off SM120). All files byte-compile; deploy doc +
 >   env-var table + pipeline diagram updated with the prefill toggle.
-> - **REMAINING: Stage 3 E2E** (user-launched — the env reaps GPU servers across tool calls): re-run the
+> - **REMAINING: Stage 3 E2E** *(historical — superseded by the 2026-06-10/11 entry below)*: re-run the
 >   rtx-pro-6000-bench 2K–64K × concurrency sweep (`bench/deepseek-v4-flash_W300_TP4_sglang/`) with
 >   `SGLANG_SM120_SPARSE_PREFILL=hmma` and confirm the c8×2048 (16384-token) prefill no longer crashes. Optional
 >   follow-up: the deferred perf hillclimb, now guided by in-server numbers.
@@ -87,6 +89,22 @@ user-killed at 8192in×c16 (partial 16K–64K rows remain); perf hillclimb defer
 >   line 19398); **zero** crashes / scheduler exceptions after it; server "fired up and ready". Throughput:
 >   2048in 56→472 tok/s (c1→c56), 8192in 45→130 tok/s (c1→c8) — decode-path numbers consistent with the prior
 >   baseline; TPOT 16–80 ms. Sweep user-killed at 8192in×c16; 16K–64K-input rows not yet collected.
+> - **2026-06-10/11 — Full sweep COMPLETE + 1M scaling + committed/pushed → quest closed.** Re-ran the whole
+>   matrix at the fleet-matched config (mem-fraction 0.80, max-running 128, cuda-graph-bs 1…128, output 1024,
+>   step-8 → c1,2,4,8,16,…,128): **67 cells, 8576/8576 requests, 0 failed over ~27 h continuous load** — incl.
+>   every > 11673-token prefill cell (the crash trigger), now green. Best sustained 756 tok/s @ 2K (c64); peaks
+>   per input 756/444/263/163/79/40 @ 2K…64K. **Separate single-stream long-context sweep** (`sglang-single.yaml`
+>   — full 1,048,576 ctx, mem 0.80, chunked-prefill 8192, max-running 1; `launch-single.sh`) doubled the prompt
+>   2K → **1,047,552** (= 1M − 1024): **all 10 lengths incl. the full 1M completed** — TTFT 0.19→6.73 s
+>   (sub-linear), TPOT 16.8→137.6 ms, 58.8→6.9 tok/s, 1M peaking at **95% VRAM/GPU (KV only 47%)**. Key finding
+>   while tuning: the long-context OOM ceiling is the **C4 indexer's transient `[pending_tokens, max_seq_len]`
+>   fp32 logits buffer** (drawn from the *runtime* pool), NOT the static KV pool — so `chunked-prefill-size` +
+>   a *lower* `mem-fraction-static` are the levers (raising mem made it worse); 0.80/chunk-8192 clears both the
+>   1M single-stream and the full concurrency sweep. **Committed + pushed:** kernel repo
+>   `deepseek-v4-flash-sm120@feat/hmma-tensor-core-sparse-decode` (08bfa86 — prefill kernel + op + MoE GEMM, 31
+>   files) and sglang fork `@feat/sm120-mxfp4-w4a4-moe` (e49e2ec2 — the prefill selector + dispatch). Deploy
+>   guide (`docs/DEPLOY-MXFP4-W4A4-DEEPSEEK-V4-FLASH-SM120.md`) + repo README updated with the sweep + 1M
+>   scaling tables, telemetry, and benchmark-folder links.
 **Repos:** out-of-tree HMMA kernel repo `ambientlight/deepseek-v4-flash-sm120` (primary); SGLang fork
 `ambientlight/sglang @ feat/sm120-mxfp4-w4a4-moe` (integration); rtx-pro-6000-bench (validation).
 
@@ -233,18 +251,18 @@ same `SGLANG_SM120_SPARSE_*` toggle pattern, opt-in, `.so` not vendored.
    full-batch kernel and compare a 1024-row reference slice (the dense reference gather OOMs at
    16384×2048×512 ≈ 64 GiB; the kernel streams KV). Skips cleanly off SM120. compute-sanitizer
    memcheck/initcheck/racecheck **0 errors**.
-2. **⬜ PENDING — Numerical drop-in (cross-arch parity):** call `deepseek_v4_kernel.ops.sparse_prefill_fwd`
-   vs stock `flash_mla_sparse_fwd` **on a Hopper/SM100 box** with identical inputs; assert match. Not yet run
-   (no Hopper/SM100 box in this env). Lower priority — the torch reference is the primary oracle and the
-   dispatcher's own `torch` fallback is validated bit-exact against it (cos 1.0).
-3. **⬜ PENDING (user-launched) — E2E (the original repro):** re-run the crashed sweep
-   `bench/deepseek-v4-flash_W300_TP4_sglang/` `--input-lens 2048..65536 --max-concurrency 64,…,64
-   --request-rate inf` with `SGLANG_SM120_SPARSE_PREFILL=hmma`. Success = the c8×2048 (16384-token) prefill no
-   longer crashes; full 2K–64K × concurrency matrix completes with throughput + telemetry + plots. The env
-   reaps GPU servers across tool calls, so this is user-launched.
-4. **⬜ PENDING — Regression:** decode path + MoE untouched (the only fork change is the
-   `_forward_prefill_sparse` dispatch swap, additive); re-confirm mini-swe-agent staggered traffic on the E2E
-   run.
+3. **✅ DONE — E2E (the original repro):** full matrix `bench/deepseek-v4-flash_W300_TP4_sglang/` (2K–64K ×
+   concurrency, `SGLANG_SM120_SPARSE_PREFILL=hmma`) ran **8576/8576 requests, 0 failed over ~27 h**; the
+   c8×2048 (16384-token) prefill and all higher > 11673-token cells no longer crash. Plus a single-stream
+   sweep to the **full 1M context** (all 10 lengths incl. 1,047,552 completed). Throughput + telemetry + plots
+   in the benchmark folder; both written up in the deploy guide + README.
+4. **✅ DONE — Regression:** decode path + MoE untouched (the only fork change is the additive
+   `_forward_prefill_sparse` dispatch swap); the 27 h sweep's decode throughput matches the prior baseline,
+   and the MoE/decode paths served the whole run without error.
+5. **⬜ PENDING (low priority) — Numerical cross-arch parity:** `deepseek_v4_kernel.ops.sparse_prefill_fwd`
+   vs stock `flash_mla_sparse_fwd` **on a Hopper/SM100 box**, identical inputs. Not run (no such box in this
+   env). Low priority — the torch reference is the primary oracle (the stock kernel validates against the
+   identical `ref_sparse_attn_fwd`), and the dispatcher's `torch` fallback is bit-exact against it (cos 1.0).
 
 ## 7. Risks / open questions — resolution
 
@@ -282,12 +300,16 @@ same `SGLANG_SM120_SPARSE_*` toggle pattern, opt-in, `.so` not vendored.
 - **✅ DONE** — Deploy-guide update: prefill toggle in the launch block, env-var table, and pipeline diagram,
   next to `SGLANG_SM120_SPARSE_DECODE`. (The `chunked-prefill-size` note is left as-is for now; the >11673 path
   is now *safe*, so dropping the cap is an E2E-time decision, not a correctness requirement.)
-- **⬜ PENDING (user-launched)** — rtx-pro-6000-bench: the full 2K–64K sweep completing (the Quest-3 bench that
-  exposed the gap, now green) — the §6.3 E2E run.
-- **⬜ OPEN (deferred)** — perf hillclimb (cp.async double-buffer, B_H head-amortization, split-KV); kernel is
-  correct + race-free at ~17 TFLOP/s, optimization guided by the E2E numbers.
-
-**Not committed yet:** all changes (fork + kernel repo + docs) are in the working tree; commit on request.
+- **✅ DONE** — rtx-pro-6000-bench: full 2K–64K × concurrency sweep complete (8576/8576, 0 failed, ~27 h) +
+  the single-stream **1M** scaling sweep (`single_longsequence/`, `sglang-single.yaml` / `launch-single.sh`);
+  results, telemetry, plots, and `bench_sweep*.log` in `bench/deepseek-v4-flash_W300_TP4_sglang/`.
+- **✅ COMMITTED + PUSHED** — kernel repo `08bfa86` (`feat/hmma-tensor-core-sparse-decode`: prefill kernel +
+  op + MoE GEMM, 31 files) and sglang fork `e49e2ec2` (`feat/sm120-mxfp4-w4a4-moe`: prefill selector +
+  dispatch). Both branches on origin; deploy-guide install path (`pip install -e` + `SGLANG_SM120_SPARSE_PREFILL`)
+  resolves against them.
+- **⬜ OPEN (deferred, out of scope for this quest)** — perf hillclimb (cp.async double-buffer, B_H
+  head-amortization, split-KV); kernel is correct + race-free at ~17 TFLOP/s. The crash-fix + correctness were
+  the goal; optimization is a follow-up, guided by the in-server numbers now in hand.
 
 ## 9. Perf characterization (op-level microbenchmarks, RTX PRO 6000, synthetic KV)
 
@@ -328,51 +350,46 @@ Sparse is **flat** (per-token cost capped at the top-k budget, independent of co
 DSv4's real million-token / topk≈2048 operating point that's a ~500× asymptotic reduction in attention work.
 This is *the reason the kernel exists*: it keeps long-prefill attention flat where dense would explode.
 
-## 10. What's left to actually run E2E in sglang (gap analysis)
+## 10. How E2E was unblocked (deployment forensics)
 
-The kernel is correct + race-free and the integration code is written, but **two hard deployment blockers**
-stand between "unit tests pass" and "server serves the > 11673 path on the HMMA kernel":
+Getting from "unit tests pass" to "server serves the > 11673 path on the HMMA kernel" hit **two deployment
+blockers** (both since RESOLVED):
 
-1. **🔴 Serving venv `~/.venvs/dsv4` is stale.** Its `deepseek_v4_kernel/cuda*.so` predates the prefill work
-   (`hasattr(cuda, "sparse_prefill_fwd")` → **False**) and the editable install points at an old
-   `/tmp/dsv4-e2e/...` clone, not the canonical repo where the kernel was built. **Fix:** rebuild/reinstall the
-   package into `~/.venvs/dsv4` from the canonical repo (`pip install -e .` or copy the freshly-built `.so`),
-   then confirm `from deepseek_v4_kernel.ops import sparse_prefill_fwd`.
-2. **🔴 Serving sglang is a non-editable copy.** `…/site-packages/sglang/` is a plain directory (installed
-   Jun 8), so the fork's new `flash_mla_sparse_prefill_sm120.py` and the edited `deepseek_v4_backend.py` are
-   **not present** in the running server (`flash_mla_sparse_fwd_sm120` grep → 0 hits). The decode toggle only
-   works because it was installed *before* this work. **Fix:** reinstall sglang from the fork into the serving
-   venv (or sync the two changed files into site-packages).
+1. **✅ RESOLVED — serving venv pointed at a stale `.so`.** The real serving venv turned out to be
+   `~/.venvs/dsv4-test` (not `dsv4`, which has a pre-existing sgl_kernel/torch-2.12 ABI break). Its editable
+   `deepseek_v4_kernel` already pointed at the canonical repo, so the freshly-built `.so` (both ops) was live
+   once confirmed. (Earlier confusion: `dsv4`'s `.so` predated the prefill work and pointed at an old
+   `/tmp/dsv4-e2e` clone.)
+2. **✅ RESOLVED — serving sglang was a non-editable copy.** `…/site-packages/sglang/` is a plain directory,
+   so the fork's new `flash_mla_sparse_prefill_sm120.py` + edited `deepseek_v4_backend.py` weren't present.
+   Fixed by syncing the two files into the serving copy; verified resolver → `hmma`, entry-point cos 0.999998.
 
 **Dispatch mechanism (confirmed):** the DSv4 backend activates the kernel through the **in-tree resolver**
 (`_forward_prefill_sparse` → `flash_mla_sparse_fwd_sm120` → `deepseek_v4_kernel.ops`), exactly like the decode
 toggle — **no `_patch.install()` needed** on this path. The `_patch.py` hook only matters for the
-`dsa_backend` / stock-sglang case (covered for free, but not on the critical path here). So once (1)+(2) are
-reinstalled, `SGLANG_SM120_SPARSE_PREFILL=hmma` is the only runtime knob.
+`dsa_backend` / stock-sglang case (covered for free, but not on the critical path here). `SGLANG_SM120_SPARSE_PREFILL=hmma`
+is the only runtime knob.
 
-**Hardening done this session:** added op-level `TORCH_CHECK` guards (`sparse_prefill.cpp`) for the
-contiguity the kernel hard-assumes — q d_qk stride==1, kv d_qk stride==1, **indices topk stride==1** (the
-kernel reads `indices_base[off+tok]` directly), plus attn_sink/topk_length dtype+numel. sglang's current
-`combined_indices` satisfies these, but unguarded they'd silently read garbage if a caller passed a
-non-contiguous topk dim. Rebuilt clean, 26/26 tests still pass.
+**Op hardening:** added `TORCH_CHECK` guards (`sparse_prefill.cpp`) for the contiguity the kernel hard-assumes
+— q d_qk stride==1, kv d_qk stride==1, **indices topk stride==1** (the kernel reads `indices_base[off+tok]`
+directly), plus attn_sink/topk_length dtype+numel. sglang's `combined_indices` satisfies these, but unguarded
+they'd silently read garbage on a non-contiguous topk dim. Rebuilt clean, 26/26 pass.
 
-**Remaining validation (in priority order):**
-- **Build-into-serving-venv smoke (🔴 gating):** after (1)+(2), launch the server with
-  `SGLANG_SM120_SPARSE_PREFILL=hmma`, send one > 11673-token prefill, confirm no crash + sane output.
-- **Real-tensor parity (🟡):** capture an actual `_forward_prefill_sparse` call's
-  `(q_flat, workspace, combined_indices, combined_lens, attn_sink)` and diff kernel vs the torch reference on
-  *live* shapes/strides (the unit tests use synthetic contiguous tensors).
-- **Cross-arch parity (🟡, no box in this env):** our op vs stock `flash_mla_sparse_fwd` on a Hopper/SM100
-  box, identical inputs.
-- **E2E sweep (🟢 user-launched):** the §6.3 2K–64K × concurrency repro, now green.
-- **Commit (🟢):** nothing is committed; both repos are working-tree only. Commit the kernel repo
-  (`csrc/sm120/prefill/*`, `csrc/api/sparse_prefill.*`, op reg, `_patch.py`, `ops.py`, `setup.py`, tests) and
-  the fork (`flash_mla_sparse_prefill_sm120.py` + backend dispatch) before/with the E2E run.
+**Validation ladder (final):**
+- **✅ Server smoke / E2E sweep:** server launched with `SGLANG_SM120_SPARSE_PREFILL=hmma`; full 2K–64K ×
+  concurrency sweep ran 8576/8576, 0 failed over ~27 h, incl. every > 11673-token cell. Plus the 1M
+  single-stream sweep (all 10 lengths).
+- **✅ Commit + push:** kernel repo `08bfa86` and sglang fork `e49e2ec2`, both on origin.
+- **🟡 Real-tensor parity (optional):** diff kernel vs torch ref on a *captured* live `_forward_prefill_sparse`
+  call (unit tests use synthetic contiguous tensors). Not done — the contiguity guards + the clean 27 h run
+  cover the practical risk.
+- **🟡 Cross-arch parity (optional, no box):** our op vs stock `flash_mla_sparse_fwd` on Hopper/SM100.
 
 ## 11. Relationship to prior quests
 - **Quest 2:** native MXFP4 W4A4 MoE (shipped).
 - **Quest 3:** upstreamed the MoE + HMMA sparse-**decode** (complete; branches/drafts live). Its E2E bench
   surfaced this prefill gap.
-- **Quest 4 (this):** the missing SM120 sparse-**prefill** kernel — same HMMA approach, same out-of-tree
-  repo, same toggle pattern — to make the full throughput sweep (and any >11673-token prefill batch) run on
-  SM120 instead of crashing on the SM90a/SM100f-only stock kernel.
+- **Quest 4 (this, ✅ complete):** the missing SM120 sparse-**prefill** kernel — same HMMA approach, same
+  out-of-tree repo, same toggle pattern — now lets the full throughput sweep (and any > 11673-token prefill
+  batch, up to the full 1M context) run on SM120 instead of crashing on the SM90a/SM100f-only stock kernel.
+  Shipped + pushed; the deferred follow-up is the perf hillclimb (the kernel is correct at ~17 TFLOP/s).

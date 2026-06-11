@@ -3,10 +3,13 @@
 Recipe for serving [DeepSeek-V4-Flash](https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash) with **native MXFP4×MXFP4 (W4A4)** fused MoE and custom **HMMA tensor-core sparse-attention** kernels — on **4× RTX PRO 6000 Blackwell
 (SM120, TP=4)**. This wires together three forks — [flashinfer](https://github.com/ambientlight/flashinfer/tree/ambientlight/mxfp4-fused-moe) (MXFP4 kernels), [sglang](https://github.com/ambientlight/sglang/tree/feat/sm120-mxfp4-w4a4-moe) (serving), and custom [sparse_decode_kernel.cuh](https://github.com/ambientlight/deepseek-v4-flash-sm120/blob/feat/hmma-tensor-core-sparse-decode/csrc/sm120/decode/sparse_decode_kernel.cuh) + [sparse_prefill_kernel.cuh](https://github.com/ambientlight/deepseek-v4-flash-sm120/blob/feat/hmma-tensor-core-sparse-decode/csrc/sm120/prefill/sparse_prefill_kernel.cuh) HMMA kernels from [deepseek-v4-flash-sm120](https://github.com/ambientlight/deepseek-v4-flash-sm120) as a drop-in replacement to DSv4 stock FlashMLA kernels unavailable for SM120.
 
-**Benchmark** ([`bench_sweep.log`](https://github.com/ambientlight/rtx-pro-6000-bench/blob/main/bench/deepseek-v4-flash_W300_TP4_sglang/bench_sweep.log)
-in [`bench/deepseek-v4-flash_W300_TP4_sglang/`](https://github.com/ambientlight/rtx-pro-6000-bench/tree/main/bench/deepseek-v4-flash_W300_TP4_sglang)):
-full 2K–64K × concurrency sweep at W300/TP4 — **8576/8576 requests, 0 failed over ~27 h continuous load**.
-Best sustained output 756 tok/s @ 2K (c64); see [Performance](#performance).
+**Benchmark** ([`bench/deepseek-v4-flash_W300_TP4_sglang/`](https://github.com/ambientlight/rtx-pro-6000-bench/tree/main/bench/deepseek-v4-flash_W300_TP4_sglang)):
+single-stream decode scales to the **full 1M context** — 64K / 128K / 256K / 512K / 1M-token prompts sustain
+41 / 31 / 21 / 12 / 7 tok/s (TTFT 0.5 / 0.8 / 1.6 / 3.3 / 6.7 s), the 1M prompt peaking at 95% VRAM
+([`…chunk8192.log`](https://github.com/ambientlight/rtx-pro-6000-bench/blob/main/bench/deepseek-v4-flash_W300_TP4_sglang/bench_sweep_single.chunk8192.log)).
+
+Concurrency sweep at W300/TP4 ([`bench_sweep.log`](https://github.com/ambientlight/rtx-pro-6000-bench/blob/main/bench/deepseek-v4-flash_W300_TP4_sglang/bench_sweep.log)): **8576/8576 requests, 0 failed over ~27 h continuous load**, best sustained 756 tok/s @ 2K (c64). See
+[Performance](#performance).
 
 ---
 
@@ -221,11 +224,12 @@ with the matrix sweep in the [repo README](https://github.com/ambientlight/rtx-p
 
 ### Long-context scaling to 1M (single stream)
 
-A separate single-concurrency sweep (config: `sglang-single.yaml` — full **1,048,576** context,
-`mem-fraction-static 0.80`, `chunked-prefill-size 8192`, `max-running-requests 1`; launch with
-`launch-single.sh` + `sweep-single.sh`) doubles the prompt 2K → **1,047,552** (= 1M − 1024, filling the native
-context exactly), one prompt per length, output 1024. **All 10 lengths completed, including the full 1M
-prompt.** Numbers from
+A separate single-concurrency sweep (config:
+[`sglang-single.yaml`](../bench/deepseek-v4-flash_W300_TP4_sglang/sglang-single.yaml) — full **1,048,576**
+context, `mem-fraction-static 0.80`, `chunked-prefill-size 8192`, `max-running-requests 1`; launch with
+[`launch-single.sh`](../bench/deepseek-v4-flash_W300_TP4_sglang/launch-single.sh)) doubles the prompt
+2K → **1,047,552** (= 1M − 1024, filling the native context exactly), one prompt per length, output 1024.
+**All 10 lengths completed, including the full 1M prompt.** Numbers from
 [`bench_sweep_single.chunk8192.log`](https://github.com/ambientlight/rtx-pro-6000-bench/blob/main/bench/deepseek-v4-flash_W300_TP4_sglang/bench_sweep_single.chunk8192.log):
 
 | Input | TTFT (prefill) | TPOT (decode) | Output tok/s | Peak VRAM/GPU | KV |
@@ -244,7 +248,7 @@ VRAM/GPU** (364 GB of 4×96 GB) — and notably **KV is only 47%**: the binding 
 the C4 indexer's transient per-chunk logits buffer, not the KV pool. That is why `chunked-prefill-size` and
 `mem-fraction-static` (not just context length) gate how far you scale: a larger chunk doubles that buffer.
 **0.80 / chunk 8192 is the config that runs both this 1M single-stream sweep and the full concurrency sweep
-above healthily** — it's the headroom threshold on 4×96 GB.
+above healthily**.
 
 ---
 

@@ -124,7 +124,8 @@ sparse-attention gather + KV-cache capacity (32K/64K saturate KV at 100%, hence 
 #### Long-context scaling to 1M (single stream, c1)
 
 A separate single-concurrency sweep doubling the prompt 2K → **1,047,552** (= 1M − 1024, so input+output fills
-the full native 1,048,576 context exactly), one prompt per length, output 1024. Run with `sglang-single.yaml`
+the full native 1,048,576 context exactly), one prompt per length, output 1024. Run with
+[`sglang-single.yaml`](bench/deepseek-v4-flash_W300_TP4_sglang/sglang-single.yaml)
 (full 1M context, `mem-fraction-static 0.80`, `chunked-prefill-size 8192`, `max-running-requests 1`). **All 10
 lengths completed, including the full 1M prompt.**
 
@@ -147,7 +148,7 @@ the full concurrency sweep above healthily.
 
 | |
 |---|
-| ![1M power](bench/deepseek-v4-flash_W300_TP4_sglang/single/deepseek-v4-flash_random_1047552in_1024out_c1_W300/telemetry_power.png) |
+| ![1M power](bench/deepseek-v4-flash_W300_TP4_sglang/single_longsequence/deepseek-v4-flash_random_1047552in_1024out_c1_W300/telemetry_power.png) |
 
 <sub>System power during the 1,047,552-token single-stream run (TTFT 6.7 s prefill, then 1024-token decode at ~7 tok/s; ~858 W mean).</sub>
 
