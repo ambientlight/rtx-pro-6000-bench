@@ -229,8 +229,7 @@ A separate single-concurrency sweep (config:
 context, `mem-fraction-static 0.80`, `chunked-prefill-size 8192`, `max-running-requests 1`; launch with
 [`launch-single.sh`](../bench/deepseek-v4-flash_W300_TP4_sglang/launch-single.sh)) doubles the prompt
 2K → **1,047,552** (= 1M − 1024, filling the native context exactly), one prompt per length, output 1024.
-**All 10 lengths completed, including the full 1M prompt.** Numbers from
-[`bench_sweep_single.chunk8192.log`](https://github.com/ambientlight/rtx-pro-6000-bench/blob/main/bench/deepseek-v4-flash_W300_TP4_sglang/bench_sweep_single.chunk8192.log):
+Numbers from [`bench_sweep_single.chunk8192.log`](https://github.com/ambientlight/rtx-pro-6000-bench/blob/main/bench/deepseek-v4-flash_W300_TP4_sglang/bench_sweep_single.chunk8192.log):
 
 | Input | TTFT (prefill) | TPOT (decode) | Output tok/s | Peak VRAM/GPU | KV |
 |------:|:--------------:|:-------------:|:------------:|:-------------:|:--:|
