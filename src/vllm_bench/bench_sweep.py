@@ -72,6 +72,7 @@ import csv
 import glob
 import json
 import os
+import shlex
 import statistics
 import subprocess
 import sys
@@ -258,6 +259,13 @@ class TelemetryCollector:
                     elif line.startswith("vllm:num_requests_running"):
                         req_running = float(line.split()[-1])
                     elif line.startswith("vllm:num_requests_waiting"):
+                        req_waiting = float(line.split()[-1])
+                    # sglang exposes different prometheus names (needs enable_metrics=true).
+                    elif line.startswith("sglang:token_usage"):
+                        kv_pct = float(line.split()[-1]) * 100.0
+                    elif line.startswith("sglang:num_running_reqs"):
+                        req_running = float(line.split()[-1])
+                    elif line.startswith("sglang:num_queue_reqs"):
                         req_waiting = float(line.split()[-1])
             except Exception:
                 pass
@@ -661,8 +669,16 @@ def run_benchmark(
         result_dir_name(args.model_id, args.input_len, args.output_len, concurrency, args.watt),
     )
 
+    # Bench launcher. Default invokes vLLM's CLI entry point via this interpreter
+    # (avoids relying on a `vllm` console script on PATH, whose shebang can go stale).
+    # Override with --bench-cmd for other OpenAI-compatible bench tools.
+    prefix = (
+        shlex.split(args.bench_cmd)
+        if getattr(args, "bench_cmd", None)
+        else [sys.executable, "-m", "vllm.entrypoints.cli.main", "bench", "serve"]
+    )
     cmd = [
-        "vllm", "bench", "serve",
+        *prefix,
         "--backend", "openai",
         "--base-url", args.base_url,
         "--endpoint", "/v1/completions",
@@ -1508,6 +1524,10 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--tokenizer", default=None, help="Path to tokenizer (defaults to /mnt/hot/ambientlight/models/{model-id})")
     p.add_argument("--watt", type=int, required=True, help="Wattage label for result dir naming (e.g. 250)")
     p.add_argument("--base-url", default="http://127.0.0.1:8000", help="vLLM server base URL")
+    p.add_argument("--bench-cmd", default=None,
+                   help="Override the bench launcher (shell string). Default: "
+                        "'python -m vllm.entrypoints.cli.main bench serve'. Works against any "
+                        "OpenAI-compatible endpoint (vLLM or sglang).")
     p.add_argument("--input-len", type=int, default=2048, help="Random input token length")
     p.add_argument("--output-len", type=int, default=1024, help="Random output token length")
     p.add_argument("--num-prompts", type=int, default=512, help="Number of prompts per benchmark run")

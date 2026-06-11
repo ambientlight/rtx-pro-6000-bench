@@ -1,0 +1,21 @@
+# DeepSeek-V4-Flash — MXFP4 W4A4 + HMMA sparse decode — sglang bench record
+# 4x RTX PRO 6000 Blackwell Max-Q (sm_120), TP4, W300
+#
+# Forks:
+#   sglang     feat/sm120-mxfp4-w4a4-moe        e1ca8d96  (+ sparse-prefill dispatch, synced into serving venv)
+#   flashinfer ambientlight/mxfp4-fused-moe     440de948
+#   HMMA       feat/hmma-tensor-core-sparse-decode  dd0a1f4  (deepseek-v4-flash-sm120; + sparse_prefill_fwd op)
+#   server venv: ~/.venvs/dsv4-test  (torch 2.11.0+cu130; deepseek_v4_kernel both ops; sglang server stack)
+#   client venv: repo .venv     (HTTP bench client; tokenizer + requests, no GPU)
+#
+# Server: bash bench/deepseek-v4-flash_W300_TP4_sglang/launch.sh
+#   (SGLANG_SM120_SPARSE_DECODE=hmma + SGLANG_SM120_SPARSE_PREFILL=hmma; > 11673-tok prefill -> HMMA kernel)
+#
+# Baseline (bench_serving output token throughput, 256in/512out): 72 / 213 / 351 / 588 tok/s @ c1/4/8/16
+#
+# Full matrix sweep (2K-64K, output 1024). Concurrency + output-len match the minimax/
+# qwen/devstral benches (output-len 1024) for cross-model comparability:
+# default max-concurrency 128 + step-size 8 (geometric 1,2,4,8 then +8 to 128), server
+# max-running-requests / cuda-graph-max-bs raised to 128, mem-fraction-static 0.80.
+# Larger-input rows auto-stop earlier when saturation is detected.
+nohup python src/vllm_bench/bench_sweep.py --matrix --telemetry --model-id deepseek-v4-flash --watt 300 --tokenizer /mnt/hot/ambientlight/models/DeepSeek-V4-Flash --input-lens 2048,4096,8192,16384,32768,65536 --output-len 1024 --step-size 8 --num-prompts 128 --max-error-rate 0.1 > bench_sweep.log 2>&1 &

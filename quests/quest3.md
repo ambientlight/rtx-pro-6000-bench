@@ -3,7 +3,9 @@
 **Date:** 2026-06-07
 **Hardware:** 4× NVIDIA RTX PRO 6000 Blackwell (SM120, 96 GB each, PCIe)
 **Model:** DeepSeek-V4-Flash (291B MoE, 256 experts, top_k=6 — **native MXFP4 checkpoint, used as-is**)
-**Status:** Implementation DONE + validated (Quest 2). This quest plans the upstreaming.
+**Status:** ✅ **COMPLETE (2026-06-09)** — all upstream-bound branches prepared, polished, and pushed to the
+fork; human-opened drafts live (FlashInfer #3533 + #3541; SGLang branch ready). Carryover → **Quest 4** (SM120
+sparse-prefill kernel). See §10 (Completion) at the bottom.
 **Scope decision:** Upstream **only** the native MXFP4×MXFP4 (W4A4-mx) E2E MoE path. The NVFP4 re-quant +
 calibration path and every Quest-1 hack are **deliberately not upstreamed** — they are superseded and only
 weaken the upstream argument.
@@ -23,10 +25,10 @@ weaken the upstream argument.
 
 ## 1. Objective
 
-Land the native MXFP4×MXFP4 fused MoE — **742 tok/s @16-wide** (matches the retired NVFP4 path's 759),
-native checkpoint format, **zero re-quant, zero calibration**, and (now validated) **best SWE-bench Lite
-accuracy of any local DeepSeek-V4-Flash deployment** — as clean, first-class, feature-gated code in
-FlashInfer and SGLang.
+Land the native MXFP4×MXFP4 fused MoE — **588 tok/s @16-wide sustained** (`bench_serving` output throughput;
+the earlier 742 was a prod *instantaneous-peak* gen-throughput figure — both real, see §10), native checkpoint
+format, **zero re-quant, zero calibration**, and (now validated) **best SWE-bench Lite accuracy of any local
+DeepSeek-V4-Flash deployment** — as clean, first-class, feature-gated code in FlashInfer and SGLang.
 
 The local implementation lives on `sm120-nvfp4-rebase` in both repos:
 - **FlashInfer** (5 commits, `1c2cefc1`→`91e527af`): `MmaMXF4Op` atom + E8M0/32 activation quantizers
@@ -74,6 +76,11 @@ The core work is **not** duplicated upstream. Verified against live PR state:
 ---
 
 ## 3. What gets upstreamed (the only narrative)
+
+> ℹ️ **§3–§6 are the original plan (2026-06-07).** Four things changed during execution (probe is a public
+> API; HMMA was kept as a toggle, not dropped; throughput methodology; doc path + PR consolidation). See
+> **§10 → "Where the plan diverged from what shipped"** for the authoritative final state, and
+> `docs/DEPLOY-MXFP4-W4A4-DEEPSEEK-V4-FLASH-SM120.md` for the canonical guide.
 
 ### FlashInfer
 1. **`num_m_tiles` correctness fix** — `num_m_tiles = tile_m // (16*4)` was copied from the dense kernel's
@@ -142,7 +149,7 @@ opens every PR manually** (see Execution Policy at top).
 | **C** | FlashInfer | `feat(sm120-moe): native MXFP4×MXFP4 CuTe-DSL fused MoE` | `moe_{static,micro,dynamic}_kernel.py`, `moe_dispatch.py` (+~81 W4A4 threading), `launch_sm120_moe` + `test_b12x_mxfp4_fused_moe.py` | ~+1100 | hunks of `1c2cefc1`,`b8fdbd02`,`aac5a172`,`91e527af` | **by-hunk** | **A + B + B½** |
 | **D** | SGLang | `fix(moe): allow FlashInfer CuTe-DSL MoE selection on SM120` | `server_args.py`, MoE backend-select util + tests | ~small | new (extract from routing) | **author fresh** | FlashInfer **C** API; ⚠️ `server_args.py` collides w/ open #27059 |
 | **E** | SGLang | `feat(deepseek-v4): native SM120 MXFP4 W4A4 MoE via FlashInfer CuTe-DSL` | `mxfp4_w4a4_moe.py` (new, +366), `fp8.py` (+32) + test | +398 | `1bec556c`,`7b20149a` | **by-hunk** (drop the HMMA edit) | **C + D**; ⚠️ close dummy-load unknown first |
-| **F** | SGLang | `docs(deepseek-v4): native SM120 MXFP4 W4A4 MoE path` | `docs/...` (port deploy guide) | docs | port `docs/deploy-mxfp4-w4a4-cutedsl.md` | **author fresh** | E |
+| **F** | SGLang | `docs(deepseek-v4): native SM120 MXFP4 W4A4 MoE path` | `docs/...` (port deploy guide) | docs | port `docs/DEPLOY-MXFP4-W4A4-DEEPSEEK-V4-FLASH-SM120.md` | **author fresh** | E |
 | **G** | sgl-kernel | `perf(sgl-kernel): SM120 HMMA FlashMLA backend` | sgl-kernel src + wrapper | — | external `.so` (must port in-tree) | **optional, later** | none; **NEVER blocks A–F** (see §6) |
 
 **The `_StaticMoELaunch` prerequisite (B½) — the one real snag.** Our entire W4A4 stack sits on `906556fb`
@@ -205,15 +212,20 @@ to the correctness-critical kernels. Default: keep in C, but be ready to split i
 smaller.
 
 ### PR D — SGLang: `fix(moe): allow FlashInfer CuTe-DSL MoE selection on SM120`
-**Files:** `server_args.py`, MoE backend-selection util, + selection tests. Feature-**probe**:
+**Files:** `server_args.py`, MoE backend-selection util, + selection tests. Feature-**probe** (✏️ **corrected
+to the SHIPPED implementation** — the original sketch used `hasattr(flashinfer, "launch_sm120_moe")`, which
+predates mxfp4 and false-positives; we instead added a **public** `sm120_moe_supported_quant_modes()` to the
+FlashInfer fork and probe that):
 ```python
-def has_flashinfer_sm120_mxfp4_moe() -> bool:
+# python/sglang/srt/layers/quantization/fp8.py
+def _has_flashinfer_sm120_mxfp4_moe() -> bool:
     try:
-        import flashinfer
+        from flashinfer.fused_moe.cute_dsl.blackwell_sm12x import (
+            sm120_moe_supported_quant_modes,
+        )
     except Exception:
         return False
-    return (hasattr(flashinfer, "launch_sm120_moe")
-            and flashinfer_supports_quant_mode("mxfp4"))
+    return "mxfp4" in sm120_moe_supported_quant_modes()
 ```
 Policy: `auto` + SM120 + native FP4 experts + probe ⇒ `flashinfer_cutedsl`; else keep the merged Triton
 fallback (#24692). **Coordinate with #27059** (FP4-indexer-SM120, also edits `server_args.py`) — do not
@@ -232,7 +244,7 @@ not assume initialized weights; verify capture is safe under `--load-format dumm
 is the one untested local unknown — **close it before opening E.**
 
 ### PR F — SGLang: `docs(deepseek-v4): native SM120 MXFP4 W4A4 MoE path`
-Port `docs/deploy-mxfp4-w4a4-cutedsl.md` (the deploy guide) + the throughput/accuracy/memory tables.
+Port `docs/DEPLOY-MXFP4-W4A4-DEEPSEEK-V4-FLASH-SM120.md` (the deploy guide) + the throughput/accuracy/memory tables.
 Target launch: `python -m sglang.launch_server --model-path DeepSeek-V4-Flash --tp 4 --trust-remote-code
 --kv-cache-dtype fp8_e4m3 --max-running-requests 16` — no env vars, no monkey-patches, no PYTHONPATH, no
 calibration.
@@ -251,9 +263,10 @@ Triton SM120 sparse decode. Re-pursue HMMA later (if ever) as a separate, option
   2026-06-01)** already ships `flash_mla_sm120_triton.py` — "Triton FlashMLA sparse decode (3.2–5.4×
   vs the FlashInfer fallback)" — as the first-class SM120 path. PR **#26499** moved FlashMLA fully
   in-tree (`sgl_kernel.flash_mla`). **SM120 sparse decode is solved upstream with zero external deps.**
-- **The HMMA `.so` is orthogonal to the MoE work.** Our SWE-bench / 742-tok/s results were measured *with*
-  the HMMA kernel, but the MoE PR's correctness and throughput do not depend on it — the MoE block is a
-  separate stage in the per-token pipeline (attention → MoE). Upstreaming MoE on top of the merged Triton
+- **The HMMA `.so` is orthogonal to the MoE work.** Our SWE-bench / throughput results (742 tok/s prod-peak;
+  588 sustained — §10) were measured *with* the HMMA kernel, but the MoE PR's correctness and throughput do
+  not depend on it — the MoE block is a separate stage in the per-token pipeline (attention → MoE).
+  Upstreaming MoE on top of the merged Triton
   decode is a clean, self-contained change.
 - **The HMMA `.so` is fundamentally un-upstreamable as-is:** external pre-compiled `.so` +
   `sys.path.insert` + a hardcoded `/mnt/hot/...` path + an out-of-tree `deepseek_v4_kernel` package. Even
@@ -354,13 +367,85 @@ earlier PR changes in review, **rebase the whole stack forward** (`git rebase --
   `quant_mode="mxfp4"`, `_weight_views` reused, workspace outside capture, scaling applied once,
   **dummy-load capture safe**).
 - **Manual E2E:** the §PR-F launch command auto-selects native SM120 MXFP4, no env/patch/PYTHONPATH, no
-  CUDA-graph IMA, no per-M JIT storm, ~742 tok/s @16-wide.
+  CUDA-graph IMA, no per-M JIT storm, ~588 tok/s @16-wide sustained (742 prod-peak — §10).
 - **All tests skip cleanly without SM120; no dependency on the benchmark repo; no unconditional pin.**
 
 ---
 
-## 10. Relationship to prior quests
+## 10. Completion (2026-06-09)
+
+**Status: COMPLETE — branches prepared, polished, pushed; human-opened drafts live.** The plan's A–F
+stacked design was executed and consolidated. Final landed shape (verified against pushed refs):
+
+### FlashInfer (fork `ambientlight/flashinfer`, branches pushed; opened as draft PRs by human)
+- **`ambientlight/num-m-tiles`** (`cc871967`) → upstream **draft #3533** — the `num_m_tiles` quadrant-drop
+  correctness fix (PR A), + skewed-routing regression test.
+- **`ambientlight/mxf4-common-dense`** (`7d78ec26`) — MXFP4 E8M0/32 quant helpers + dense `MmaMXF4Op` (PR B).
+- **`ambientlight/mxfp4-fused-moe`** (`440de948`) → upstream **draft #3541** — the native MXFP4×MXFP4 fused
+  MoE (PR C), **retitled "dense + fused MoE"** to fold B in, + the public `sm120_moe_supported_quant_modes()`
+  capability API (added this session so SGLang feature-probes a public function, not `_normalize_quant_mode`).
+- The standalone `_StaticMoELaunch` runtime-m wrapper (planned PR B½) was **deferred** to a perf follow-up
+  (`ambientlight/rt-perf`), not on the critical path — the fused-MoE branch uses per-M static kernels.
+
+### SGLang (fork `ambientlight/sglang`, branch pushed; draft prepared, human opens)
+- **`feat/sm120-mxfp4-w4a4-moe`** (`e1ca8d96`) — clean branch off `sgl-project/sglang:main` (PRs D+E merged
+  into one feature PR): `Mxfp4W4A4MoEMethod` + `mxfp4_sm120_common` swizzle + the **`fp8.py` feature-probe**
+  (replaced the `SGLANG_MXFP4_W4A4=1` env var per the "no env var" goal), the **3-way
+  `SGLANG_SM120_SPARSE_DECODE` toggle** (hmma|triton|torch), and the **capture-safe indexer routing fix**
+  (separate commit). Draft PR body at `quests/pr-bodies/sglang-pr-mxfp4-w4a4.md`.
+- All `W4A4-mx` coinage removed from upstream-facing surfaces → `MXFP4 W4A4` / `MXFP4`.
+
+### HMMA (out-of-tree `ambientlight/deepseek-v4-flash-sm120` @ `feat/hmma-tensor-core-sparse-decode`, `dd0a1f4`)
+- Kept out-of-tree (PR G never blocked A–F). README leads with the HMMA optimization section; the
+  RTX PRO 6000 tuned W8A8 + MoE configs are now **committed** (`dd0a1f4`) so users get them on clone.
+
+### Validated this session (the carryover that seeds Quest 4)
+- **E2E bench harness** (`bench/deepseek-v4-flash_W300_TP4_sglang/`) added to the rtx-pro-6000-bench repo:
+  the feature-probe selects the MXFP4 W4A4 method with **no env var**, HMMA decode active, tuned configs
+  loaded; smoke sweep produces throughput + GPU telemetry (incl. live `sglang:token_usage` KV-cache %) + plots.
+- **Open upstream-facing item from §8 still applies:** dummy-load safety of `process_weights_after_loading`
+  (real E8M0 swizzles) — left as an unchecked test item in the SGLang draft.
+- **NEW GAP → Quest 4:** the SM120 **sparse-prefill** attention path has no SM120 kernel. The stress bench
+  (`request-rate=inf`, ≥8 concurrent × 2048-in = 16384 prefill query tokens > the 11673 `_LARGE_INDEXER_
+  QUERY_THRESHOLD`) routes to stock `sgl_kernel.sparse_prefill_fwd`, which is **SM90a/SM100f only** →
+  `RuntimeError: Sparse Attention Forward Kernel is only supported on SM90a and SM100f architectures`. Real
+  staggered agent traffic (mini-swe-agent @ 16 sessions) never co-batches >11673 fresh prefill tokens, so it
+  never tripped — but the synthetic max-throughput sweep does. **Quest 4 builds the SM120 sparse-prefill
+  HMMA kernel** (mirroring sparse-decode: drop-in for `flash_mla_sparse_fwd`, out-of-tree).
+
+### Where the plan diverged from what shipped (authoritative — supersedes §3–§6 where they conflict)
+The §3–§6 plan was correct *as a plan*; these four things changed during execution. The current source of
+truth is **`docs/DEPLOY-MXFP4-W4A4-DEEPSEEK-V4-FLASH-SM120.md`**.
+
+1. **Feature-probe is a public API, not `hasattr`.** §5/PR-D sketched
+   `hasattr(flashinfer, "launch_sm120_moe") and flashinfer_supports_quant_mode(...)`. **Shipped:**
+   `_has_flashinfer_sm120_mxfp4_moe()` → `"mxfp4" in sm120_moe_supported_quant_modes()`. We **added a public
+   `sm120_moe_supported_quant_modes()` to the FlashInfer fork** specifically so SGLang probes a stable public
+   function (not the private `_normalize_quant_mode`); `launch_sm120_moe` alone predates mxfp4 and would
+   false-positive.
+2. **HMMA was KEPT, not dropped.** §6 decided to drop the HMMA monkey-patch and rely on upstream Triton.
+   **Shipped:** the monkey-patch/`sys.path.insert` is gone, but HMMA lives on as a clean **3-way
+   `SGLANG_SM120_SPARSE_DECODE` toggle (hmma | triton | torch, default `triton`)** via
+   `is_deepseek_v4_kernel_available()` (importlib probe). It stays **out-of-tree** (the `.so` is not vendored),
+   and the in-tree Triton path remains the default fallback — so the upstream-clean argument holds *and* HMMA
+   is available. (The original §6 reasoning about un-upstreamability of the `.so` still stands; the toggle is
+   the reconciliation.)
+3. **Throughput numbers/methodology.** §1/§9/§10 cite **742 tok/s @16w** (prod *instantaneous gen-throughput*
+   peak). The deploy doc now reports **`bench_serving` sustained output throughput: 72 / 213 / 351 / 588 tok/s
+   @ c1/4/8/16** — a stricter sustained-aggregate metric, not a regression (peak per-run hit 77/249/440/720).
+   Both are real; the doc is the canonical figure going forward.
+4. **Doc path + PR consolidation.** §5 PR-F referenced `docs/deploy-mxfp4-w4a4-cutedsl.md`; the canonical guide
+   is **`docs/DEPLOY-MXFP4-W4A4-DEEPSEEK-V4-FLASH-SM120.md`**. The A–F PRs consolidated to **3 FlashInfer
+   branches + 1 SGLang feature branch** (B folded into the fused-MoE branch; D+E merged; B½ deferred to
+   `rt-perf`). Branches were renamed `pr/A-*` → `ambientlight/*` (feature-descriptive, per the fork-PR review).
+
+
+---
+
+## 11. Relationship to prior quests
+
 - **Quest 0:** NVFP4 W4A4 on the old fork; discovered the JIT problem; first `_StaticMoELaunch` prototype.
 - **Quest 1:** Mainline; fixed JIT cache-key instability; 759 tok/s — but NVFP4 re-quant + calibration (hacky).
 - **Quest 2:** Built + validated native MXFP4×MXFP4 (W4A4-mx) — 742 tok/s @16w, zero re-quant/calibration, best local SWE-bench (DONE).
-- **Quest 3 (this):** Upstream Quest-2's W4A4-mx as first-class SM120 code, on top of the merged Triton SM120 baseline (#24692), deleting every Quest-1 hack and dropping the HMMA monkey-patch from the MoE story.
+- **Quest 3 (this):** Upstream Quest-2's W4A4-mx as first-class SM120 code, on top of the merged Triton SM120 baseline (#24692), deleting every Quest-1 hack and dropping the HMMA monkey-patch from the MoE story. ✅ **COMPLETE** (branches pushed, drafts live).
+- **Quest 4 (next):** Close the SM120 **sparse-prefill** gap surfaced by the E2E throughput bench — build an HMMA tensor-core `flash_mla_sparse_fwd` kernel for SM120 (mirroring the sparse-decode kernel), so high-concurrency / long-prefill batches stop crashing on the SM90a/SM100f-only stock kernel.

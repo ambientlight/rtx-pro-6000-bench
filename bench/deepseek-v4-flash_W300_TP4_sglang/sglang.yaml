@@ -1,0 +1,68 @@
+# DeepSeek-V4-Flash — native MXFP4 W4A4 on 4x RTX PRO 6000 Blackwell (sm_120)
+# Engine: sglang fork ambientlight/feat/sm120-mxfp4-w4a4-moe (e1ca8d96)
+# Venv:   ~/.venvs/dsv4/   (serving venv: sglang server stack + deepseek_v4_kernel both ops)
+# Forks:  sglang feat/sm120-mxfp4-w4a4-moe · flashinfer ambientlight/mxfp4-fused-moe (440de948)
+#         HMMA   deepseek-v4-flash-sm120 feat/hmma-tensor-core-sparse-decode (dd0a1f4)
+# Guide:  docs/DEPLOY-MXFP4-W4A4-DEEPSEEK-V4-FLASH-SM120.md
+#
+# Launch (env vars the yaml can't set — see launch.sh):
+#   export SGLANG_SM120_SPARSE_DECODE=hmma        # HMMA tensor-core sparse decode
+#   export SGLANG_SM120_SPARSE_PREFILL=hmma       # HMMA tensor-core sparse prefill (> 11673-tok)
+#   export FLASHINFER_DISABLE_VERSION_CHECK=1     # fork flashinfer 0.6.13 vs cubin 0.6.12
+#   export SGLANG_SKIP_SGL_KERNEL_VERSION_CHECK=1
+#   export SGLANG_OPT_USE_TILELANG_INDEXER=1 SGLANG_OPT_USE_TILELANG_MHC_POST=1
+#   export SGLANG_ENABLE_JIT_DEEPGEMM=0 SGLANG_OPT_USE_MULTI_STREAM_OVERLAP=0
+#   export SGLANG_OPT_USE_FUSED_HASH_TOPK=0 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+#   export NCCL_PROTO=LL NCCL_ALGO=Ring NCCL_MIN_NCHANNELS=8 NCCL_NTHREADS=512
+#   export CUDA_VISIBLE_DEVICES=0,1,2,3
+#   python -m sglang.launch_server --config bench/deepseek-v4-flash_W300_TP4_sglang/sglang.yaml
+# (SM120+DeepseekV4 auto-sets FP8_WO_A_GEMM, USE_TOPK_V2, TILELANG_MHC_PRE,
+#  DEEPGEMM_HC_PRENORM, FP8_PAGED_MQA_LOGITS_TORCH at startup.)
+
+# sglang --config requires hyphenated keys (model-path, not model_path).
+model-path: /mnt/hot/ambientlight/models/DeepSeek-V4-Flash
+served-model-name: deepseek-v4-flash
+host: 0.0.0.0
+port: 8000
+trust-remote-code: true
+
+# Parallelism
+tensor-parallel-size: 4
+pipeline-parallel-size: 1
+
+# Context & scheduling
+#   131072 (not the model's native 1,048,576) — fits the 64K-input bench matrix and
+#   frees KV cache for higher concurrency at long inputs.
+context-length: 131072
+max-running-requests: 128
+chunked-prefill-size: 16384
+page-size: 256
+
+# Quantization (native MXFP4 experts, feature-probe-selected; no quantization flag needed)
+kv-cache-dtype: fp8_e4m3
+
+# Memory
+# 0.80: the earlier "0.80 OOM at 2048in/c8" was actually the SM90a/SM100f-only
+# sparse-prefill crash misdiagnosed as OOM (now fixed by the SM120 HMMA prefill
+# kernel), not a real memory failure. Matches the minimax bench's 0.90-class
+# headroom while leaving room for the bs<=128 CUDA-graph capture pool.
+mem-fraction-static: 0.80
+
+# Backends (sm_120 Blackwell workstation)
+moe-runner-backend: triton
+dsa-topk-backend: torch
+
+# CUDA graphs (capture up to bs=128 to match max-running-requests; geometric set
+# covers the sweep's 1..128 ramp so high-concurrency decode stays graphed — the
+# step-of-8 levels in between pad up to the next captured bs, as before)
+cuda-graph-max-bs: 128
+cuda-graph-bs: [1, 2, 4, 8, 16, 32, 64, 128]
+disable-custom-all-reduce: true
+disable-shared-experts-fusion: true
+
+# Metrics (REQUIRED for bench_sweep telemetry — exposes /metrics with
+# sglang:token_usage, sglang:num_running_reqs, sglang:num_queue_reqs)
+enable-metrics: true
+
+watchdog-timeout: 3600
+log-level: info
