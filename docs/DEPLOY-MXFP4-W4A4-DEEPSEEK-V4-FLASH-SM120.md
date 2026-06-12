@@ -80,8 +80,6 @@ Three forks, all gated SM120-only:
 
 ## Launch
 
-A ready launch script lives at `repos/sglang/debug/launch-mxfp4-w4a4-e2e-test.sh`. The essentials:
-
 ```bash
 source ~/.venvs/dsv4/bin/activate
 # The HMMA kernel is a pip-installed package (Installation step), so no PYTHONPATH is
