@@ -4,9 +4,10 @@ Recipe for serving [DeepSeek-V4-Flash](https://huggingface.co/deepseek-ai/DeepSe
 (SM120, TP=4)**. This wires together three forks — [flashinfer](https://github.com/ambientlight/flashinfer/tree/ambientlight/mxfp4-fused-moe) (MXFP4 kernels), [sglang](https://github.com/ambientlight/sglang/tree/feat/sm120-mxfp4-w4a4-moe) (serving), and custom [sparse_decode_kernel.cuh](https://github.com/ambientlight/deepseek-v4-flash-sm120/blob/feat/hmma-tensor-core-sparse-decode/csrc/sm120/decode/sparse_decode_kernel.cuh) + [sparse_prefill_kernel.cuh](https://github.com/ambientlight/deepseek-v4-flash-sm120/blob/feat/hmma-tensor-core-sparse-decode/csrc/sm120/prefill/sparse_prefill_kernel.cuh) HMMA kernels from [deepseek-v4-flash-sm120](https://github.com/ambientlight/deepseek-v4-flash-sm120) as a drop-in replacement to DSv4 stock FlashMLA kernels unavailable for SM120.
 
 **Benchmark** ([`bench/deepseek-v4-flash_W300_TP4_sglang/`](https://github.com/ambientlight/rtx-pro-6000-bench/tree/main/bench/deepseek-v4-flash_W300_TP4_sglang)):
-single-stream decode scales to the **full 1M context** — 64K / 128K / 256K / 512K / 1M-token prompts sustain
-41 / 31 / 21 / 12 / 7 tok/s (TTFT 0.5 / 0.8 / 1.6 / 3.3 / 6.7 s), the 1M prompt peaking at 95% VRAM
-([`…chunk8192.log`](https://github.com/ambientlight/rtx-pro-6000-bench/blob/main/bench/deepseek-v4-flash_W300_TP4_sglang/bench_sweep_single.chunk8192.log)).
+single-stream decode scales to the **full 1M context** — with the split-KV indexer
+(`SGLANG_SM120_INDEXER_SPLIT`) 64K / 128K / 256K / 512K / 1M-token prompts sustain
+46 / 38 / 27 / 18 / 10 tok/s (TTFT 0.5 / 0.8 / 1.6 / 3.3 / 6.5 s), the 1M prompt peaking at 95% VRAM
+([`…indexer_split.log`](https://github.com/ambientlight/rtx-pro-6000-bench/blob/main/bench/deepseek-v4-flash_W300_TP4_sglang/bench_sweep_single.indexer_split.log)).
 
 Concurrency sweep at W300/TP4 ([`bench_sweep.log`](https://github.com/ambientlight/rtx-pro-6000-bench/blob/main/bench/deepseek-v4-flash_W300_TP4_sglang/bench_sweep.log)): **8576/8576 requests, 0 failed over ~27 h continuous load**, best sustained 756 tok/s @ 2K (c64). See
 [Performance](#performance).
@@ -94,6 +95,7 @@ export SGLANG_SM120_SPARSE_PREFILL=hmma           # sparse attention, large-batc
 # DEEPGEMM_HC_PRENORM, FP8_PAGED_MQA_LOGITS_TORCH at startup — no need to export them.
 export SGLANG_OPT_USE_TILELANG_INDEXER=1        # default off; the fast SM120 indexer
 export SGLANG_OPT_USE_TILELANG_MHC_POST=1
+export SGLANG_SM120_INDEXER_SPLIT=1             # split-KV indexer
 export SGLANG_ENABLE_JIT_DEEPGEMM=0             # no SM120 DeepGEMM recipe
 export SGLANG_OPT_USE_MULTI_STREAM_OVERLAP=0    # breaks CUDA-graph capture on SM120
 export SGLANG_OPT_USE_FUSED_HASH_TOPK=0         # SM120 dtype mismatch
@@ -149,6 +151,7 @@ Startup ~5 min (weight load + CUDA-graph capture across the bs 1…128 ladder).
       |
       +-- Indexer (tilelang FP8 paged-MQA-logits)
             indexer.py: is_sm120_supported() -> capture-safe dsv4/ kernel
+              SGLANG_SM120_INDEXER_SPLIT=1 -> split-KV grid (single-stream long-ctx)
 ```
 
 ### MoE — FlashInfer feature-probe
@@ -177,6 +180,8 @@ mechanism. Confirm with the install block's L1 probe one-liner.
 | `FLASHINFER_DISABLE_VERSION_CHECK` | `1` | fork flashinfer-python 0.6.13 vs cubin 0.6.12 |
 | `SGLANG_SKIP_SGL_KERNEL_VERSION_CHECK` | `1` | only if the venv's sgl-kernel lags the branch's request; our path uses no new API |
 | `SGLANG_OPT_USE_TILELANG_INDEXER` | `1` | Fast FP8 paged-MQA-logits indexer; SM120 routing fix sends it to the capture-safe `dsv4/` kernel |
+| `SGLANG_SM120_INDEXER_SPLIT` | `1` | Shards the indexer logits scan across `(batch, num_splits)` CTAs instead of 1 CTA/batch. Single-stream long-context win (≈1.5× output tok/s @ 1M, scaling 1.0×→1.5× from 8K→1M) |
+| `SGLANG_SM120_INDEXER_SPLIT_COUNT` | `256` | Number of KV-splits per batch row for the above (only read when `SGLANG_SM120_INDEXER_SPLIT=1`) |
 | `SGLANG_ENABLE_JIT_DEEPGEMM` | `0` | No SM120 DeepGEMM recipe |
 | `SGLANG_OPT_USE_MULTI_STREAM_OVERLAP` | `0` | Multi-stream breaks CUDA-graph capture on SM120 |
 | `SGLANG_OPT_USE_FUSED_HASH_TOPK` | `0` | SM120 dtype mismatch |
@@ -225,27 +230,32 @@ with the matrix sweep in the [repo README](https://github.com/ambientlight/rtx-p
 A separate single-concurrency sweep (config:
 [`sglang-single.yaml`](../bench/deepseek-v4-flash_W300_TP4_sglang/sglang-single.yaml) — full **1,048,576**
 context, `mem-fraction-static 0.80`, `chunked-prefill-size 8192`, `max-running-requests 1`; launch with
-[`launch-single.sh`](../bench/deepseek-v4-flash_W300_TP4_sglang/launch-single.sh)) doubles the prompt
+[`launch-single.sh`](../bench/deepseek-v4-flash_W300_TP4_sglang/launch-single.sh), which enables
+`SGLANG_SM120_INDEXER_SPLIT=1`) doubles the prompt
 2K → **1,047,552** (= 1M − 1024, filling the native context exactly), one prompt per length, output 1024.
-Numbers from [`bench_sweep_single.chunk8192.log`](https://github.com/ambientlight/rtx-pro-6000-bench/blob/main/bench/deepseek-v4-flash_W300_TP4_sglang/bench_sweep_single.chunk8192.log):
+Numbers from [`bench_sweep_single.indexer_split.log`](https://github.com/ambientlight/rtx-pro-6000-bench/blob/main/bench/deepseek-v4-flash_W300_TP4_sglang/bench_sweep_single.indexer_split.log):
 
-| Input | TTFT (prefill) | TPOT (decode) | Output tok/s | Peak VRAM/GPU | KV |
-|------:|:--------------:|:-------------:|:------------:|:-------------:|:--:|
-| 2,048 | 0.19 s | 16.8 ms | 58.8 | 85% | 1% |
-| 8,192 | 0.23 s | 17.5 ms | 56.3 | 85% | 2% |
-| 32,768 | 0.32 s | 20.4 ms | 48.3 | 87% | 7% |
-| 131,072 | 0.85 s | 31.8 ms | 30.7 | 87% | 7% |
-| 262,144 | 1.60 s | 46.9 ms | 20.7 | 88% | 12% |
-| 524,288 | 3.29 s | 77.3 ms | 12.4 | 90% | 23% |
-| **1,047,552** | **6.73 s** | **137.6 ms** | **6.9** | **95%** | **47%** |
+| Input | TTFT (prefill) | TPOT (decode) | Output tok/s | vs no-split | Peak VRAM/GPU | KV |
+|------:|:--------------:|:-------------:|:------------:|:-----------:|:-------------:|:--:|
+| 2,048 | 0.19 s | 16.7 ms | 59.2 | 1.01× | 85% | 1% |
+| 8,192 | 0.20 s | 17.2 ms | 57.6 | 1.02× | 85% | 2% |
+| 32,768 | 0.31 s | 18.9 ms | 52.1 | 1.08× | 87% | 7% |
+| 131,072 | 0.79 s | 25.8 ms | 37.6 | 1.22× | 87% | 7% |
+| 262,144 | 1.58 s | 35.0 ms | 27.4 | 1.32× | 88% | 12% |
+| 524,288 | 3.26 s | 53.5 ms | 17.7 | 1.43× | 90% | 23% |
+| **1,047,552** | **6.46 s** | **90.2 ms** | **10.4** | **1.51×** | **95%** | **47%** |
 
-TTFT scales **sub-linearly** (0.19 → 6.73 s for 512× the tokens — the sparse-prefill kernel) and TPOT ~8×
-(16.8 → 137.6 ms, the per-step sparse gather over a growing KV workspace). The 1M prompt peaks at **95%
-VRAM/GPU** (364 GB of 4×96 GB) — and notably **KV is only 47%**: the binding constraint at extreme context is
-the C4 indexer's transient per-chunk logits buffer, not the KV pool. That is why `chunked-prefill-size` and
-`mem-fraction-static` (not just context length) gate how far you scale: a larger chunk doubles that buffer.
-**0.80 / chunk 8192 is the config that runs both this 1M single-stream sweep and the full concurrency sweep
-above healthily**.
+The **split-KV indexer** (`SGLANG_SM120_INDEXER_SPLIT`) drives the long-context numbers here. The DSv4
+sparse-attention indexer scans the whole KV every decode step on one CTA per batch row, which leaves the GPU
+idle at single-stream; sharding it across `(batch, num_splits)` CTAs is bit-exact and grows from a no-op at 8K
+to **1.51× at 1M** (TPOT 137.6 → 90.2 ms vs the un-split
+[`…chunk8192.log`](https://github.com/ambientlight/rtx-pro-6000-bench/blob/main/bench/deepseek-v4-flash_W300_TP4_sglang/bench_sweep_single.chunk8192.log)).
+It is single-stream only — a no-op under the concurrency sweep, where the batch grid already fills the SMs.
+
+TTFT scales **sub-linearly** (0.19 → 6.46 s for 512× the tokens). The 1M prompt peaks at **95% VRAM/GPU** with
+**KV only 47%** — the binding constraint at extreme context is the C4 indexer's transient per-chunk logits
+buffer, not the KV pool, so `chunked-prefill-size` and `mem-fraction-static` (not just context length) gate how
+far you scale. **0.80 / chunk 8192 runs both this 1M sweep and the full concurrency sweep above healthily.**
 
 ---
 
