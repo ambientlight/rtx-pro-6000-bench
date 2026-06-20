@@ -124,10 +124,8 @@ Clean run — **0 harness errors**, and 497/500 reached `Submitted` (76.5% of th
 resolved). The 3 non-submits: 2× `LimitsExceeded` (hit step-250 empty) + 1×
 `RepeatedFormatError`
 
-- **Loops controlled** (`frequency_penalty: 0.1`): only 2/500 trajectories with a
-  severe (>100×) repeated line, vs. the 75 runaway loops that sank the
-  no-penalty thinking attempt. Loop severity still costs accuracy (84.6% resolved
-  at no/normal repetition → 41.7% at moderate), but it's a tail, not a trend.
+- **Loops controlled** (`frequency_penalty: 0.1`): 2/500 trajectories with a
+  severe (>100×) repeated line
 - **vs. the 73.0% run**: 28 newly solved, 13 regressed, 352 stable (96.4% of the
   prior wins held). Net +15, comfortably above run-to-run variance.
 
