@@ -322,6 +322,10 @@ served via:
 PYTORCH_ALLOC_CONF=expandable_segments:True vllm serve /path/to/model --config /path/to/model/vllm.yaml --port 8000 -O3
 ```
 
+**sglang models:**
+
+- [DeepSeek-V4-Flash](bench/deepseek-v4-flash_W300_TP4_sglang/sglang-single.yaml) — checkpoint: [deepseek-ai/DeepSeek-V4-Flash](https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash) (native MXFP4 W4A4); native MXFP4 fused MoE + HMMA sparse-attention on SM120 via three forks — [setup](docs/DEPLOY-MXFP4-W4A4-DEEPSEEK-V4-FLASH-SM120.md). Served via [`launch-single.sh`](bench/deepseek-v4-flash_W300_TP4_sglang/launch-single.sh).
+
 ### Log Files
 
 | File | Content |
