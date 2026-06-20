@@ -122,21 +122,14 @@ python -m swebench.harness.run_evaluation \
 
 Clean run — **0 harness errors**, and 497/500 reached `Submitted` (76.5% of those
 resolved). The 3 non-submits: 2× `LimitsExceeded` (hit step-250 empty) + 1×
-`RepeatedFormatError` — and that one is **infrastructure, not the tool-call path**:
-the Docker container died mid-run (`The container is completely gone`) and the
-agent exhausted its format-error budget against a dead env, while still emitting
-valid `tool_calls` throughout.
+`RepeatedFormatError`
 
-- **Turns separate winners from losers**: resolved median 36 turns, unresolved 55,
-  empty 194. Only 2 instances hit the step limit (both empty) — the harness isn't
-  leaving solvable work on the table.
 - **Loops controlled** (`frequency_penalty: 0.1`): only 2/500 trajectories with a
   severe (>100×) repeated line, vs. the 75 runaway loops that sank the
   no-penalty thinking attempt. Loop severity still costs accuracy (84.6% resolved
   at no/normal repetition → 41.7% at moderate), but it's a tail, not a trend.
 - **vs. the 73.0% run**: 28 newly solved, 13 regressed, 352 stable (96.4% of the
-  prior wins held). A couple of the regressions are explained (the dead-container
-  case above; one moderate loop). Net +15, comfortably above run-to-run variance.
+  prior wins held). Net +15, comfortably above run-to-run variance.
 
 ## `frequency_penalty`
 
