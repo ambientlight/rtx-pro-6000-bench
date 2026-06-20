@@ -2,15 +2,12 @@
 
 Agentic SWE-bench Verified of DeepSeek-V4-Flash served on 4× RTX PRO 6000
 (SM120, TP=4) via the native MXFP4 W4A4 + HMMA sparse-kernel stack, driven by
-mini-swe-agent **2.4.2 native tool-calling** over litellm/`hosted_vllm`. Serving
+mini-swe-agent **2.4.2**. Serving
 recipe:
 [DEPLOY-MXFP4-W4A4-DEEPSEEK-V4-FLASH-SM120.md](../../../docs/DEPLOY-MXFP4-W4A4-DEEPSEEK-V4-FLASH-SM120.md).
 
-This is our **best result to date — 76.0%**, up +3.0pt from the
-[2026-06-18 run (73.0%)](../deepseek-v4-flash-2026-06-18/). Same model/serving;
-the gain comes from moving the agent to mini-swe-agent 2.4's native tool-calling
-(the model's `<｜DSML｜…>` tool-call markup parsed server-side via
-`--tool-call-parser deepseekv4`) in place of v1's XML action regex.
+3% gain from [2026-06-18 run (73.0%)](../deepseek-v4-flash-2026-06-18/) mini-swe-bench upgrade from 1.17.3 to 2.4.2.
+(the model's `<｜DSML｜…>` tool-call markup parsed server-side via --tool-call-parser deepseekv4` in place of v1's XML action regex)
 
 ## Result
 
@@ -118,14 +115,11 @@ python -m swebench.harness.run_evaluation \
   --max_workers 64 --timeout 6000
 ```
 
-## Trajectory characteristics
+## Trajectories
 
-Clean run — **0 harness errors**, and 497/500 reached `Submitted` (76.5% of those
-resolved). The 3 non-submits: 2× `LimitsExceeded` (hit step-250 empty) + 1×
-`RepeatedFormatError`
+497/500 `Submitted`. The 3 non-submits: 2 `LimitsExceeded` (hit step-250 empty), 1 `RepeatedFormatError`
 
-- **Loops controlled** (`frequency_penalty: 0.1`): 2/500 trajectories with a
-  severe (>100×) repeated line
+- **Reasoning loops** (`frequency_penalty: 0.1`): 2/500 trajectories with (>100×) repeated line
 - **vs. the 73.0% run**: 28 newly solved, 13 regressed, 352 stable (96.4% of the
   prior wins held). Net +15, comfortably above run-to-run variance.
 
