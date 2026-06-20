@@ -86,6 +86,9 @@ Full 2K–64K × concurrency sweep, **8576/8576 requests succeeded, 0 failed** �
 prefill batches that crash stock sgl-kernel on SM120 (the gap the HMMA sparse-prefill kernel closes). Setup +
 kernel details: [docs/DEPLOY-MXFP4-W4A4-DEEPSEEK-V4-FLASH-SM120.md](docs/DEPLOY-MXFP4-W4A4-DEEPSEEK-V4-FLASH-SM120.md).
 
+Accuracy on this stack: **365/500 = 73.0%** on SWE-bench Verified (thinking + MAX reasoning
+effort). Config, trajectories, and reproduce guide: [evals/swebench-verified/deepseek-v4-flash-2026-06-18/](evals/swebench-verified/deepseek-v4-flash-2026-06-18/README.md).
+
 #### Peak Output Throughput at 300W (tok/s)
 
 | Input Length | Peak tok/s | @ concurrency | Mean system power |

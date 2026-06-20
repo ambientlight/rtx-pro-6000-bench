@@ -259,6 +259,16 @@ far you scale. **0.80 / chunk 8192 runs both this 1M sweep and the full concurre
 
 ---
 
+## Validation (SWE-bench Verified)
+
+Agentic accuracy on this stack: **365 / 500 = 73.0%** on SWE-bench Verified,
+run with [mini-swe-agent](https://github.com/ambientlight/mini-swe-agent/tree/v1.17.3_dev)
+over the served endpoint (thinking + MAX reasoning effort, `--reasoning-parser deepseek-v4`).
+Full config, per-instance trajectories, scored report, and a reproduce guide:
+[`evals/swebench-verified/deepseek-v4-flash-2026-06-18/`](../evals/swebench-verified/deepseek-v4-flash-2026-06-18/README.md).
+
+---
+
 ## End-to-end pipeline (MXFP4 W4A4 decode, 1 token)
 
 Blocks marked `*` differ from the FP8 path. Only the **MoE FFN expert GEMM** is MXFP4 W4A4; For a single decode token the **default sparse-attention path** runs (selected by
