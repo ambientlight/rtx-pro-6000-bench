@@ -103,6 +103,10 @@ export SGLANG_OPT_USE_FUSED_HASH_TOPK=0         # SM120 dtype mismatch
 # --- reasoning (thinking + MAX effort; pairs with --reasoning-parser deepseek-v4 below) ---
 export SGLANG_DEFAULT_THINKING=1                # thinking mode on
 export SGLANG_DSV4_REASONING_EFFORT=max         # inject the MAX-effort prefix (both required)
+# Two parsers below, both required for an agentic tool-calling client:
+#   --reasoning-parser deepseek-v4  strips <think>…</think> into reasoning_content
+#   --tool-call-parser deepseekv4   parses the model's <｜DSML｜…> markup into structured
+#     tool_calls (without it the calls return as raw content and the agent can't act on them)
 
 # --- version guards ---
 export FLASHINFER_DISABLE_VERSION_CHECK=1
@@ -126,6 +130,7 @@ python -m sglang.launch_server \
   --disable-custom-all-reduce --disable-shared-experts-fusion \
   --dsa-topk-backend torch \
   --reasoning-parser deepseek-v4 \
+  --tool-call-parser deepseekv4 \
   --watchdog-timeout 3600 --log-level info
 ```
 
@@ -272,12 +277,12 @@ far you scale. **0.80 / chunk 8192 runs both this 1M sweep and the full concurre
 
 ## Validation (SWE-bench Verified)
 
-Agentic accuracy on this stack: **365 / 500 = 73.0%** on SWE-bench Verified,
-run with [mini-swe-agent](https://github.com/ambientlight/mini-swe-agent/tree/v1.17.3_dev)
-against the [`launch-single.sh`](../bench/deepseek-v4-flash_W300_TP4_sglang/launch-single.sh)
-endpoint (thinking + MAX reasoning effort, `--reasoning-parser deepseek-v4`).
+Agentic accuracy on this stack: **380 / 500 = 76.0%** on SWE-bench Verified,
+run with [mini-swe-agent](https://github.com/ambientlight/mini-swe-agent/tree/v2.4.2_dev)
+(2.4 native tool-calling) against the [`launch-single.sh`](../bench/deepseek-v4-flash_W300_TP4_sglang/launch-single.sh)
+endpoint (thinking + MAX reasoning effort, `--reasoning-parser deepseek-v4` + `--tool-call-parser deepseekv4`).
 Full config, per-instance trajectories, scored report, and a reproduce guide:
-[`evals/swebench-verified/deepseek-v4-flash-2026-06-18/`](../evals/swebench-verified/deepseek-v4-flash-2026-06-18/README.md).
+[`evals/swebench-verified/deepseek-v4-flash-2026-06-20/`](../evals/swebench-verified/deepseek-v4-flash-2026-06-20/README.md).
 
 ---
 

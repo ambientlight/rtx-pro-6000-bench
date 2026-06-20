@@ -46,6 +46,10 @@ export CUDA_COREDUMP_SHOW_PROGRESS=1
 export CUDA_COREDUMP_GENERATION_FLAGS="skip_global_memory,skip_shared_memory,skip_local_memory"
 export CUDA_COREDUMP_FILE="$HERE/cudacore.%h.%p"
 
-# --reasoning-parser deepseek-v4 splits <think> out of responses (CLI > config).
+# --reasoning-parser deepseek-v4 splits <think> out of responses.
+# --tool-call-parser deepseekv4 parses the model's native <｜DSML｜...> tool-call
+# markup into structured tool_calls (required for tool-calling clients, e.g.
+# mini-swe-agent v2 — without it the calls come back as raw content and fail to parse).
 exec python -m sglang.launch_server --config "$HERE/sglang-single.yaml" \
-  --reasoning-parser deepseek-v4
+  --reasoning-parser deepseek-v4 \
+  --tool-call-parser deepseekv4
