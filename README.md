@@ -130,7 +130,7 @@ A separate single-concurrency sweep doubling the prompt 2K → **1,047,552** (= 
 [`sglang-single.yaml`](bench/deepseek-v4-flash_W300_TP4_sglang/sglang-single.yaml)
 (full 1M context, `mem-fraction-static 0.80`, `chunked-prefill-size 8192`, `max-running-requests 1`) +
 [`launch-single.sh`](bench/deepseek-v4-flash_W300_TP4_sglang/launch-single.sh), which enables the **split-KV
-indexer** (`SGLANG_SM120_INDEXER_SPLIT`). **All 10 lengths completed, including the full 1M prompt.**
+indexer** (`SGLANG_SM120_INDEXER_SPLIT`).
 
 | Input | TTFT (prefill) | TPOT (decode) | Output tok/s | vs no-split | Peak VRAM/GPU | KV |
 |------:|:--------------:|:-------------:|:------------:|:-----------:|:-------------:|:--:|
