@@ -100,6 +100,10 @@ export SGLANG_ENABLE_JIT_DEEPGEMM=0             # no SM120 DeepGEMM recipe
 export SGLANG_OPT_USE_MULTI_STREAM_OVERLAP=0    # breaks CUDA-graph capture on SM120
 export SGLANG_OPT_USE_FUSED_HASH_TOPK=0         # SM120 dtype mismatch
 
+# --- reasoning (thinking + MAX effort; pairs with --reasoning-parser deepseek-v4 below) ---
+export SGLANG_DEFAULT_THINKING=1                # thinking mode on
+export SGLANG_DSV4_REASONING_EFFORT=max         # inject the MAX-effort prefix (both required)
+
 # --- version guards ---
 export FLASHINFER_DISABLE_VERSION_CHECK=1
 export SGLANG_SKIP_SGL_KERNEL_VERSION_CHECK=1
@@ -113,18 +117,25 @@ python -m sglang.launch_server \
   --model-path ./DeepSeek-V4-Flash \
   --served-model-name deepseek-v4-flash \
   --tp 4 --trust-remote-code --host 0.0.0.0 --port 8000 \
-  --context-length 1048576 --mem-fraction-static 0.80 \
-  --max-running-requests 128 \
+  --context-length 1048576 --mem-fraction-static 0.90 \
+  --max-running-requests 16 \
   --kv-cache-dtype fp8_e4m3 \
   --moe-runner-backend triton \
-  --chunked-prefill-size 16384 --page-size 256 \
-  --cuda-graph-max-bs 128 --cuda-graph-bs 1 2 4 8 16 32 64 128 \
+  --chunked-prefill-size 8192 --page-size 256 \
+  --cuda-graph-max-bs 16 --cuda-graph-bs 1 2 4 8 16 \
   --disable-custom-all-reduce --disable-shared-experts-fusion \
   --dsa-topk-backend torch \
+  --reasoning-parser deepseek-v4 \
   --watchdog-timeout 3600 --log-level info
 ```
 
-Startup ~5 min (weight load + CUDA-graph capture across the bs 1…128 ladder).
+This is the [`launch-single.sh`](../bench/deepseek-v4-flash_W300_TP4_sglang/launch-single.sh) /
+[`sglang-single.yaml`](../bench/deepseek-v4-flash_W300_TP4_sglang/sglang-single.yaml) recipe — the
+config used for the [SWE-bench Verified eval](#validation-swe-bench-verified). The concurrency
+**Performance** sweep below instead used `--max-running-requests 128 --mem-fraction-static 0.80
+--chunked-prefill-size 16384 --cuda-graph-bs 1…128` (higher batch for throughput).
+
+Startup ~5 min (weight load + CUDA-graph capture across the bs 1…16 ladder).
 
 ---
 
