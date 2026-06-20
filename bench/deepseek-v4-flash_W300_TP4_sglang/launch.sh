@@ -14,6 +14,10 @@ export SGLANG_SM120_SPARSE_PREFILL=hmma           # HMMA tensor-core sparse pref
 # DEEPGEMM_HC_PRENORM, FP8_PAGED_MQA_LOGITS_TORCH at startup).
 export SGLANG_OPT_USE_TILELANG_INDEXER=1
 export SGLANG_OPT_USE_TILELANG_MHC_POST=1
+# Split-KV indexer: gated to batch <= SGLANG_SM120_INDEXER_SPLIT_MAX_BS (default
+# 128 = graph ceiling). Helps single-stream long context; a no-op once the decode
+# batch fills the SMs, so harmless under the c32 concurrency sweep.
+export SGLANG_SM120_INDEXER_SPLIT=1
 export SGLANG_ENABLE_JIT_DEEPGEMM=0
 export SGLANG_OPT_USE_MULTI_STREAM_OVERLAP=0
 export SGLANG_OPT_USE_FUSED_HASH_TOPK=0

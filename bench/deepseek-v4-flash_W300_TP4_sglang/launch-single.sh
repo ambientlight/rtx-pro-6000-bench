@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Launch DeepSeek-V4-Flash for the SINGLE-CONCURRENCY long-context (->1M) scaling
-# test (sglang-single.yaml: full 1M context, mem 0.90, max-running-requests 8).
-# Same SM120 env as launch.sh. Wait for /v1/models, then run sweep-single.sh.
+# Launch DeepSeek-V4-Flash for the SWE-bench Verified eval (thinking + MAX reasoning
+# effort) on the served :8000 endpoint. Config: sglang-single.yaml (1M context,
+# max-running-requests 16). Wait for /v1/models before sending requests.
 set -euo pipefail
 
 source ~/.venvs/dsv4-test/bin/activate
@@ -19,6 +19,13 @@ export SGLANG_SM120_INDEXER_SPLIT_COUNT=128
 export SGLANG_ENABLE_JIT_DEEPGEMM=0
 export SGLANG_OPT_USE_MULTI_STREAM_OVERLAP=0
 export SGLANG_OPT_USE_FUSED_HASH_TOPK=0
+
+# --- Reasoning (thinking + MAX effort) ---
+# dsv4 chat encoder injects the MAX-effort prefix only when BOTH are set; the
+# --reasoning-parser below splits <think>...</think> into reasoning_content so a
+# client only sees clean `content`.
+export SGLANG_DEFAULT_THINKING=1                 # thinking_mode -> "thinking"
+export SGLANG_DSV4_REASONING_EFFORT=max          # inject "Reasoning Effort: Absolute maximum ..."
 
 # Version guards
 export FLASHINFER_DISABLE_VERSION_CHECK=1
@@ -39,4 +46,6 @@ export CUDA_COREDUMP_SHOW_PROGRESS=1
 export CUDA_COREDUMP_GENERATION_FLAGS="skip_global_memory,skip_shared_memory,skip_local_memory"
 export CUDA_COREDUMP_FILE="$HERE/cudacore.%h.%p"
 
-exec python -m sglang.launch_server --config "$HERE/sglang-single.yaml"
+# --reasoning-parser deepseek-v4 splits <think> out of responses (CLI > config).
+exec python -m sglang.launch_server --config "$HERE/sglang-single.yaml" \
+  --reasoning-parser deepseek-v4

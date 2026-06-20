@@ -71,11 +71,14 @@ token-tracking / `max_consecutive_errors` patches this config relies on):
 | Agent harness | `github.com/ambientlight/mini-swe-agent` | `v1.17.3_dev` |
 | Inference server | `github.com/ambientlight/sglang` | `feat/sm120-mxfp4-w4a4-moe` |
 
-**1. Serve the model** (4× RTX PRO 6000, SM120). From the sglang fork's venv:
+**1. Serve the model** (4× RTX PRO 6000, SM120) — endpoint on `:8000` from
+[`launch-single.sh`](../../../bench/deepseek-v4-flash_W300_TP4_sglang/launch-single.sh)
+(thinking + MAX effort + `--reasoning-parser deepseek-v4`) +
+[`sglang-single.yaml`](../../../bench/deepseek-v4-flash_W300_TP4_sglang/sglang-single.yaml)
+(1M context, mrr 16). From the sglang fork's venv:
 
 ```bash
-# launches DeepSeek-V4-Flash on :8000 with thinking + MAX effort + reasoning-parser
-bash bench/deepseek-v4-flash_W300_TP4_sglang/launch-single.sh
+bash bench/deepseek-v4-flash_W300_TP4_sglang/launch-single.sh   # wait for /v1/models
 ```
 
 **2. Run the agent** over SWE-bench Verified (16 workers):
@@ -86,7 +89,8 @@ cd mini-swe-agent && uv sync
 mini-extra swebench --subset verified --split test -w 16 \
   -c /path/to/config.yaml \
   -o ./results-deepseek-v4-flash-VERIFIED
-# config.yaml = the config.yaml in this folder; api_base points at :8000
+# config.yaml = the config.yaml in this folder; its api_base targets the :8000
+# endpoint served by launch-single.sh above.
 ```
 
 **3. Score** with the official SWE-bench harness (timeout 1200s was too short for
