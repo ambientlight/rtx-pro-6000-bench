@@ -821,31 +821,39 @@ def run_sweep(args: argparse.Namespace) -> list[BenchResult]:
 
     print(f"Concurrency schedule: {schedule}")
     if args.dry_run:
-        print("[DRY RUN MODE — no benchmarks will be executed]\n")
+        print("[DRY RUN MODE — no benchmarks will be executed; showing the plan]\n")
 
     results: list[BenchResult] = []
     best_duration: float | None = None
     points_past_best: int = 0  # how many data points collected after best
 
-    for i, conc in enumerate(schedule):
-        # --reuse: skip if result already exists
-        if args.reuse and not args.dry_run:
-            rdir = os.path.join(
-                args.result_dir,
-                result_dir_name(args.model_id, args.input_len, args.output_len, conc, args.watt),
-            )
+    # Result directories are durable state. Walk the ladder in order; for each
+    # concurrency level either REUSE an existing clean result, SKIP it because the
+    # ladder already saturated (so it was never meant to run), or RUN it. Saturation
+    # is tracked across BOTH reused and freshly-run points, so resuming a row that
+    # early-stopped does not replay the post-saturation cells it deliberately skipped.
+    for conc in schedule:
+        rdir = os.path.join(
+            args.result_dir,
+            result_dir_name(args.model_id, args.input_len, args.output_len, conc, args.watt),
+        )
+
+        # 1) Reuse existing durable state if present and clean.
+        if args.reuse:
             existing_json = find_latest_result(rdir)
             if existing_json:
                 try:
                     result = parse_result(existing_json, conc)
                     if result.has_errors(args.max_error_rate):
-                        print(f"\n[REUSE] c={conc}: existing result has error rate "
-                              f"{result.error_rate():.1%} (>{args.max_error_rate:.1%}), re-running")
+                        print(f"[RUN  ] c={conc}: existing result errored "
+                              f"({result.error_rate():.1%} > {args.max_error_rate:.1%}) — will re-run")
+                        # fall through to the run/skip decision below
                     else:
                         _attach_telemetry_summary(result, rdir)
-                        print(f"\n[REUSE] c={conc}: loaded existing result "
-                              f"(duration={result.duration:.1f}s, {result.output_throughput:.1f} tok/s)")
+                        print(f"[REUSE] c={conc}: {result.output_throughput:.1f} tok/s "
+                              f"(duration={result.duration:.1f}s)")
                         results.append(result)
+                        # reused points still advance the saturation tracker
                         if best_duration is None or result.duration < best_duration:
                             best_duration = result.duration
                             points_past_best = 0
@@ -853,13 +861,25 @@ def run_sweep(args: argparse.Namespace) -> list[BenchResult]:
                             points_past_best += 1
                         continue
                 except (KeyError, json.JSONDecodeError) as e:
-                    print(f"\n[REUSE] c={conc}: failed to parse existing result, re-running ({e})")
+                    print(f"[RUN  ] c={conc}: existing result unparseable ({e}) — will re-run")
 
-        result = run_benchmark(conc, args, dry_run=args.dry_run)
-
-        if args.dry_run:
+        # 2) If the ladder already saturated, this MISSING cell was intentionally
+        #    skipped by early-stop — do not run it (matches how the row was swept).
+        if (
+            not args.no_early_stop
+            and best_duration is not None
+            and points_past_best >= args.early_stop_extra
+        ):
+            print(f"[SKIP ] c={conc}: past saturation "
+                  f"({points_past_best} points past best) — not run")
             continue
 
+        # 3) Run it (or, in dry-run, just report the intent).
+        if args.dry_run:
+            print(f"[RUN  ] c={conc}: would run (no existing result)")
+            continue
+
+        result = run_benchmark(conc, args, dry_run=False)
         if result is None:
             print(f"  Skipping concurrency {conc} due to error")
             continue
@@ -877,8 +897,9 @@ def run_sweep(args: argparse.Namespace) -> list[BenchResult]:
                     print(f"\n*** SATURATION DETECTED at concurrency {conc} ***")
                     print(f"    Best duration was {best_duration:.1f}s; "
                           f"collected {points_past_best} extra point(s) past best.")
-                    print("    Stopping sweep.")
-                    break
+                    print("    Stopping further RUNS for this input length.")
+                    # Do NOT break: keep walking the ladder so any remaining cells
+                    # are reused-if-present or explicitly reported as skipped.
 
     return results
 
@@ -1685,6 +1706,11 @@ def run_matrix_sweep(
             args.output_len = orig_output_len
             args.max_concurrency = orig_max_concurrency
 
+        if args.dry_run:
+            # Dry-run: run_sweep already printed the REUSE/RUN/SKIP plan per cell;
+            # don't summarize or plot (RUN cells have no data yet).
+            continue
+
         if results:
             all_results[(il, ol)] = results
             print(f"\n  [{il}in/{ol}out] Completed: {len(results)} data points")
@@ -1704,6 +1730,9 @@ def run_matrix_sweep(
                 args.output_len = orig_output_len
         else:
             print(f"\n  [{il}in/{ol}out] No results")
+
+    if args.dry_run:
+        print(f"\n{'='*70}\n  DRY RUN complete — no benchmarks executed.\n{'='*70}")
 
     return all_results
 
@@ -1737,6 +1766,9 @@ def main() -> None:
     if args.matrix:
         # --- Matrix sweep mode ---
         all_results = run_matrix_sweep(args)
+
+        if args.dry_run:
+            return
 
         if not all_results:
             print("\nNo results from matrix sweep. Nothing to summarize or plot.")
