@@ -13,47 +13,64 @@ Benchmark sweep harness for local model inference (SM120). Sweeps concurrency le
 
 ## Models Benchmarked
 
-| Model | Architecture | Params (total / active) | Context | Engine | Notes |
-|-------|-------------|------------------------|---------|--------|-------|
-| **Qwen3.5-397B-A17B** | MoE | 397B / 17B | 131,072 | vLLM | |
-| **MiniMax-M2.5** | MoE | 230B / 10B | 196,608 | vLLM | |
-| **Devstral-2-123B** | Dense | 123B | 262,144 | vLLM | torch.compile mode 3, CUDAGraphs, fuse_act_quant=false (sm_120) |
-| **DeepSeek-V4-Flash** | MoE (MLA + sparse) | 284B / 13B | 1,048,576 | sglang | native MXFP4 W4A4 experts + HMMA tensor-core sparse decode **and** prefill + split-KV long-context indexer (sm_120); TP4 |
+| Model | Released | Architecture | Params (total / active) | Context | Engine | Weights | Quantization | Config | Tput 2K·c64 (tok/s) | Tput 64K·c16 (tok/s) | SWE-bench Verified (mini-swe-agent v2.4.2) | 1M decode (tok/s, c1)¹ | 1M prefill TTFT (c1)¹ | Notes |
+|-------|----------|-------------|------------------------|---------|--------|---------|--------------|--------|:------------------:|:-------------------:|:------------------:|:---------------------:|:---------------------:|-------|
+| **MiniMax-M3** | Jun 1, 2026 | MoE (GQA + sparse) | 428B / 23B | 1,048,576 | sglang | [olka-fi/MiniMax-M3-MXFP4](https://huggingface.co/olka-fi/MiniMax-M3-MXFP4) | MXFP4 experts + MXFP8 linears | [launch-bwrap-highconc.sh](bench/minimax-m3-mxfp4_W300_TP4_sglang/launch-bwrap-highconc.sh) | 1,045 | 35 | [74.8%](quests/quest5.md) (374/500) | **39.2** | 7.7 s | native MXFP4 W4A4 experts (clamped SwiGLU-OAI) + MXFP8 weight-only linears + SM120 Triton MSA block-sparse attention; split-K MXFP8; TP4 |
+| **DeepSeek-V4-Flash** | Apr 24, 2026 | MoE (MLA + sparse) | 284B / 13B | 1,048,576 | sglang | [deepseek-ai/DeepSeek-V4-Flash](https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash) | MXFP4 experts + FP8 rest (native) | [sglang-single.yaml](bench/deepseek-v4-flash_W300_TP4_sglang/sglang-single.yaml) | 756 | 40 | [76.0%](evals/swebench-verified/deepseek-v4-flash-2026-06-20/README.md) (380/500) | 11.1 | 6.5 s | native MXFP4 W4A4 experts + block-FP8 attention/dense + HMMA tensor-core sparse decode **and** prefill + split-KV long-context indexer (sm_120); TP4 |
+| **Qwen3.5-397B-A17B** | Feb 16, 2026 | MoE | 397B / 17B | 262,144 | vLLM | [nvidia/Qwen3.5-397B-A17B-NVFP4](https://huggingface.co/nvidia/Qwen3.5-397B-A17B-NVFP4) | NVFP4 | [vllm.yaml](bench/qwen35-397b-a17b-nvfp4_W250_TP4_vllm/vllm.yaml) | 1,036 | 98 | — | — | — | |
+| **MiniMax-M2.5** | Feb 12, 2026 | MoE | 230B / 10B | 196,608 | vLLM | [lukealonso/MiniMax-M2.5-NVFP4](https://huggingface.co/lukealonso/MiniMax-M2.5-NVFP4) | NVFP4 | [vllm.yaml](bench/minimax_m25-nvfp4_W250_TP4_vllm/vllm.yaml) | 1,557 | 81 | — | — | — | |
+| **Devstral-2-123B** | Dec 9, 2025 | Dense | 123B | 262,144 | vLLM | [mistralai/Devstral-2-123B-Instruct-2512](https://huggingface.co/mistralai/Devstral-2-123B-Instruct-2512) | NVFP4 | [vllm.yaml](bench/devstral-2-123b-instruct-2512_W250_TP4_vllm/vllm.yaml) | 1,107 | 25 | — | — | — | quantized to NVFP4 ([script](src/misc/quantize_devstral2_123b_nvfp4.py)); torch.compile mode 3, CUDAGraphs, fuse_act_quant=false (sm_120) |
 
-All vLLM models: `tensor_parallel_size: 4`, `gpu_memory_utilization: 0.90`, `kv_cache_dtype: fp8_e4m3`, `enable_chunked_prefill: true`, `max_num_seqs: 128`, `max_num_batched_tokens: 65536`. DeepSeek-V4-Flash (sglang): `tp 4`, `mem-fraction-static 0.80`, `kv-cache-dtype fp8_e4m3`, `max-running-requests 128`, `chunked-prefill-size 16384`.
+Throughput is output tok/s at fixed concurrency (2K input @ c64 · 64K input @ c16); MiniMax-M3 and
+DeepSeek-V4-Flash at 300 W, the three vLLM models at 250 W. The vLLM models cap at ≤256K context and were run
+throughput-only (no accuracy eval), hence —.
+
+<sub>¹ Single-stream (c1) decode tok/s / prefill TTFT at 1047552-token input (= 1048576 − 1024).</sub>
 
 ## Results Summary
 
 **Test parameters**: 128 random prompts per run, 1024 output tokens, input lengths from 2K to 64K.
 
-### W300 / TP4: Qwen3.5-397B vs DeepSeek-V4-Flash
+### W300 / TP4: Qwen3.5-397B vs DeepSeek-V4-Flash vs MiniMax-M3
 
-The two models swept at **300W, TP4** on this box (same `--output-len 1024 --step-size 8` matrix). Different
-families and stacks — Qwen3.5-397B-A17B (NVFP4, vLLM) vs DeepSeek-V4-Flash (native MXFP4 W4A4 + MLA/sparse
-attention, sglang) — so this is a "what runs at W300/TP4 here", not really direct apples-to-apples comparison.
+Three models swept at **300W, TP4** on this box (same `--output-len 1024 --step-size 8` matrix). Qwen3.5-397B-A17B
+(NVFP4, vLLM) is a different family/stack, so vs Qwen is "what runs at W300/TP4 here". **DeepSeek-V4-Flash and
+MiniMax-M3 are the apples-to-apples pair** — both mixed-precision on the *same sglang stack* (native MXFP4 W4A4
+routed experts + 8-bit attention/dense: DSV4 block-FP8, M3 MXFP8), same box, same 300 W cap; the only
+differences are architectural (DSV4 MLA + per-token sparse indexer vs M3 GQA block-sparse top-16) and scale
+(284B/13B vs 428B/23B).
 
 #### Peak Output Throughput (tok/s)
 
-| Input Length | Qwen3.5-397B-A17B (NVFP4, vLLM) | DeepSeek-V4-Flash (MXFP4, sglang) |
-|:------------:|:-------------------------------:|:---------------------------------:|
-| 2,048 | **1,124** @c64 | 756 @c64 |
-| 4,096 | **908** @c64 | 444 @c32 |
-| 8,192 | **649** @c72 | 263 @c40 |
-| 16,384 | **387** @c48 | 163 @c104 |
-| 32,768 | **212** @c32 | 79 @c40 |
-| 65,536 | **102** @c16 | 40 @c16 |
+| Input Length | Qwen3.5-397B-A17B (NVFP4, vLLM) | DeepSeek-V4-Flash (MXFP4, sglang) | MiniMax-M3 (MXFP4, sglang) |
+|:------------:|:-------------------------------:|:---------------------------------:|:--------------------------:|
+| 2,048 | 1,124 @c64 | 756 @c64 | **1,593** @c128¹ |
+| 4,096 | **908** @c64 | 444 @c32 | 445 @c104 |
+| 8,192 | **649** @c72 | 263 @c40 | 237 @c56 |
+| 16,384 | **387** @c48 | 163 @c104 | 134 @c32 |
+| 32,768 | **212** @c32 | 79 @c40 | 71 @c16 |
+| 65,536 | **102** @c16 | 40 @c16 | 35 @c16 |
+
+<sub>¹ M3's 2K curve had not saturated at the c128 sweep ceiling (still rising c120→c128), so 1,593 is a floor.
+At mid-lengths (8K–64K) DSV4 edges M3 on peak-concurrent throughput — its MLA decode packs a denser batch — but
+M3 wins decisively on single-stream and long-context decode (below).</sub>
 
 #### Single-User (concurrency=1, 2K input)
 
-| Metric | Qwen3.5-397B-A17B | DeepSeek-V4-Flash |
-|--------|:-----------------:|:-----------------:|
-| TTFT p50 | **255 ms** | 604 ms |
-| TPOT p50 | **11.3 ms** | 16.8 ms |
-| Output throughput | **86.4 tok/s** | 57.6 tok/s |
-| Mean power @ 2K peak | 1,062 W | **1,009 W** |
+| Metric | Qwen3.5-397B-A17B | DeepSeek-V4-Flash | MiniMax-M3 |
+|--------|:-----------------:|:-----------------:|:----------:|
+| TTFT p50 | **255 ms** | 604 ms | 815 ms² |
+| TPOT p50 | **11.3 ms** | 16.8 ms | 12.9 ms |
+| Output throughput | **86.4 tok/s** | 57.6 tok/s | 73.3 tok/s |
+| Mean power @ 2K peak | 1,062 W | **1,009 W** | 1,079 W |
 
-Qwen leads on raw throughput/latency; DeepSeek-V4-Flash is the larger-context (1M) MLA+sparse model and the
-only one here on native MXFP4 W4A4 + a custom SM120 attention stack. Per-model detail below.
+<sub>² M3 c1 TTFT here is cold-shape-JIT inflated; warm ≈ 216 ms (W250 sweep). On decode M3 (12.9 ms TPOT,
+73 tok/s) clearly beats DSV4 (16.8 ms, 58 tok/s) at 2K — and the gap widens with context (see long-context
+section: M3 holds 37.6 tok/s at 1M vs DSV4's 10.4).</sub>
+
+Qwen leads on raw short-context throughput/latency; among the two native-MXFP4 sglang models, DSV4 and M3 trade
+places (DSV4 denser at mid-length concurrency, M3 far stronger single-stream and at long context). Per-model
+detail below.
 
 ### Peak Output Throughput at 250W (tok/s)
 
@@ -147,6 +164,97 @@ indexer** (`SGLANG_SM120_INDEXER_SPLIT`).
 | ![1M power](bench/deepseek-v4-flash_W300_TP4_sglang/single_longsequence_indexersplit/deepseek-v4-flash_random_1047552in_1024out_c1_W300/telemetry_power.png) |
 
 <sub>System power during the 1,047,552-token single-stream run (split-KV indexer; TTFT 6.5 s prefill, then 1024-token decode at ~10 tok/s; ~900 W mean).</sub>
+
+
+
+
+### MiniMax-M3 (W300, sglang, native MXFP4 W4A4 + MXFP8 linears + sparse attention)
+
+428B / 23B-active MoE with MiniMax Sparse Attention (GQA, block-sparse top-16). Native MXFP4 W4A4 routed
+experts (clamped SwiGLU-OAI) + MXFP8 weight-only linears + **fp8 KV cache** + **split-K MXFP8** GEMMs, all on
+SM120 Triton MSA attention. Quality: **40/41 = 97.6%** on GSM8K (greedy). Setup + kernel details:
+[docs/DEPLOY-MXFP4-W4A4-MINIMAX-M3-SM120.md](docs/DEPLOY-MXFP4-W4A4-MINIMAX-M3-SM120.md).
+
+Full 2K–64K × concurrency sweep at W300: **9,088/9,088 requests succeeded, 0 failed**; a matching W250 sweep
+adds another **9,856/9,856, 0 failed** (18,944 requests total, zero failures across both power caps).
+
+#### Peak Output Throughput at 300W (tok/s)
+
+| Input Length | Peak tok/s | @ concurrency | Mean system power |
+|:------------:|:----------:|:-------------:|:-----------------:|
+| 2,048 | **1,593** | c128 (still climbing) | 1,079 W |
+| 4,096 | **445** | c104 | 1,123 W |
+| 8,192 | **237** | c56 | 1,123 W |
+| 16,384 | **134** | c32 | 1,113 W |
+| 32,768 | **71** | c16 | 1,119 W |
+| 65,536 | **35** | c16 | 1,104 W |
+
+The 2K curve had not saturated at c128 (the sweep ceiling) — throughput was still rising (1,204 @c120 → 1,593
+@c128), so 1,593 is a floor, not a peak. Longer inputs saturate KV early (c16–c56), as expected.
+
+#### Single-User Latency (concurrency=1, by prompt length)
+
+| Input Length | TTFT p50 | TTFT p99 | TPOT p50 | Output tok/s | E2E p50 (s) |
+|:------------:|:--------:|:--------:|:--------:|:------------:|:-----------:|
+| 2,048 | 815 ms† | 859 ms | 12.9 ms | 73.3 | 14.0 |
+| 4,096 | 844 ms | 1,608 ms | 12.9 ms | 71.6 | 14.0 |
+| 8,192 | 3,176 ms | 3,201 ms | 13.0 ms | 62.5 | 16.4 |
+| 16,384 | 6,362 ms | 6,408 ms | 13.1 ms | 52.0 | 19.7 |
+| 32,768 | 12,746 ms | 12,844 ms | 13.3 ms | 38.9 | 26.4 |
+| 65,536 | 25,746 ms | 25,907 ms | 13.8 ms | 25.8 | 39.9 |
+
+<sub>† The 2K TTFT includes a one-time cold-shape CuteDSL JIT charged to the first sweep run; warm ≈ 216 ms
+(per the W250 sweep). Decode/TPOT are unaffected.</sub>
+
+TPOT holds **12.9 → 13.8 ms across a 32× context increase** (2K → 64K) — M3's block-sparse decode scans only
+the top-16 KV blocks, so per-token cost is near context-independent; single-stream throughput tapers 73 → 26
+tok/s purely from the growing prefill/KV, not decode. TTFT scales with prompt length (prefill).
+
+| | |
+|---|---|
+| ![Throughput vs concurrency](bench/minimax-m3-mxfp4_W300_TP4_sglang/plots/minimax-m3_compare_W300/compare_throughput_vs_concurrency.png) | ![Peak power](bench/minimax-m3-mxfp4_W300_TP4_sglang/minimax-m3_random_2048in_1024out_c128_W300/telemetry_power.png) |
+
+<sub>Left: output throughput vs concurrency across input lengths. Right: system power at peak 2K throughput
+(1,593 tok/s @ c128) — ~1,079 W mean, 90.5% GPU util, 46% mem-bandwidth util.</sub>
+
+#### Decode-only throughput vs Marlin baseline (short prompt, by concurrency)
+
+A separate decode-only measurement (short output, no prefill amortization): native MXFP4 W4A4 **batches**
+concurrent decode where the Marlin W4A16 baseline (24.6 tok/s c1) **serializes** and collapses past c4:
+
+| concurrency | 1 | 2 | 4 | 16 | 32 |
+|:-----------:|:--:|:--:|:--:|:---:|:---:|
+| **agg tok/s** | **79** | 131 | 231 | 701 | 975 |
+
+#### Long-context scaling to 1M (single stream, c1)
+
+Single-stream, input 2K → ~1.04M, decode steady-state (full 1M context, `mem-fraction-static 0.95`,
+`chunked-prefill-size 8192`; fp8 KV pool holds 1,069,580 tokens; 1M run holds 370 GB VRAM, KV 98%). **Same box,
+same 300 W cap** as the DeepSeek-V4-Flash sweep above — so the comparison is power-controlled, and the
+difference is architectural (M3 GQA block-sparse vs DSV4 MLA). DSV4 column = its **best** long-ctx config
+(split-KV indexer, from the table above):
+
+| Input | M3 TTFT | M3 prefill tok/s | **M3 decode tok/s** | DSV4 decode tok/s | M3/DSV4 |
+|------:|:-------:|:----------------:|:-------------------:|:-----------------:|:-------:|
+| 2,048 | 0.7 s¹ | — ¹ | **76.4** | 59.8 | 1.3× |
+| 32,768 | 0.4 s | 79,300 | **72.6** | 52.9 | 1.4× |
+| 131,072 | 0.9 s | 139,800 | **65.8** | 38.7 | 1.7× |
+| 262,144 | 1.9 s | 134,900 | **59.3** | 28.6 | 2.1× |
+| 524,288 | 4.2 s | 125,700 | **50.1** | 18.7 | 2.7× |
+| **~1.04M** | **7.7 s** | **136,800** | **39.2** | 11.1 | **3.5×** |
+
+<sub>¹ 2K is prefill-trivial (TTFT is fixed launch overhead, not compute), so its "prefill tok/s" is not
+meaningful. **These are fresh runs on the dynamic-M stack**: the earlier long-context sweep charged a per-chunk
+CuteDSL recompile storm to TTFT (1M prefill took **513 s @ ~2,028 tok/s**); compiling the SM120 MoE kernel with
+a symbolic token dim (`FLASHINFER_B12X_STATIC_DYNAMIC_M`) collapses that to **7.7 s @ 136,800 tok/s — a 67×
+prefill TTFT win** with **decode unchanged** (the fix is purely prefill-side). See [quest5](quests/quest5.md).</sub>
+
+**M3 decode degrades only −49 % over a 512× context increase (76.4 → 39.2 tok/s); DSV4 drops −81 % even with
+its split-KV indexer (59.8 → 11.1).** The gap widens with length (1.3× at 2K → 3.5× at 1M): M3's sparse-attention
+decode scans only the top-16 KV blocks (cost ~context-independent), its indexer auto-shards across up to 256
+CTAs at c1, fp8 KV keeps KV bandwidth low, and split-K keeps the MXFP8 linears off the critical path. The full 1M
+single sequence fits at `mem-fraction-static 0.95`, and — post-dynamic-M — prefill sustains ~130 k tok/s all the
+way out, so the 1M prompt is fully processed in **7.7 s** rather than 8.5 min.
 
 
 
@@ -332,43 +440,6 @@ PYTORCH_ALLOC_CONF=expandable_segments:True vllm serve /path/to/model --config /
 |------|---------|
 | `b.log` | Single-line `bench-sweep` invocation command with all CLI args |
 | `bench_sweep.log` | Full concatenated stdout from all benchmark runs (config dumps, progress, result tables) |
-
-## Power: W250 vs W300 (Qwen3.5-397B-A17B)
-
-Additionally see [notebooks/analysis.ipynb](notebooks/analysis.ipynb).
-
-#### Peak Output Throughput (tok/s)
-
-| Input Length | W250 | W300 | Delta |
-|:------------:|:----:|:----:|:-----:|
-| 2,048 | 1,041 @c72 | **1,124** @c64 | +7.9% |
-| 4,096 | 865 @c96 | **908** @c64 | +5.0% |
-| 8,192 | 616 @c80 | **649** @c72 | +5.3% |
-| 16,384 | 366 @c48 | **387** @c48 | +5.8% |
-| 32,768 | 205 @c32 | **212** @c32 | +3.5% |
-| 65,536 | 98 @c16 | **102** @c16 | +4.5% |
-
-#### Single-User Latency (concurrency=1, 2K input)
-
-| Metric | W250 | W300 | Delta |
-|--------|:----:|:----:|:-----:|
-| TTFT p50 | 260 ms | **255 ms** | -1.9% |
-| TPOT p50 | 11.5 ms | **11.3 ms** | -1.7% |
-| Output throughput (mean) | 85.4 tok/s | **86.4 tok/s** | +1.2% |
-
-#### Power Draw at Peak Throughput (2K input)
-
-| Metric | W250 | W300 | Delta |
-|--------|:----:|:----:|:-----:|
-| Mean system power | **913 W** | 1,062 W | +16.4% |
-| Peak system power | **1,030 W** | 1,207 W | +17.2% |
-| Efficiency (tok/s/W) | **1.14** | 1.06 | -7.2% |
-
-| | |
-|---|---|
-| ![Throughput & Power](notebooks/plots/w250_vs_w300_throughput_power.png) | ![Prefill vs Decode Power](notebooks/plots/prefill_vs_decode_power.png) |
-
-<sub>Generated by [notebooks/analysis.ipynb](notebooks/analysis.ipynb)</sub>
 
 ---
 
