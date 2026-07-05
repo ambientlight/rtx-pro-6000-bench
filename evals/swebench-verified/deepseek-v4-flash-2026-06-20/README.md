@@ -80,15 +80,21 @@ raw content and the 2.4 agent fails every turn (`RepeatedFormatError`).
 | Agent harness | `github.com/ambientlight/mini-swe-agent` | `v2.4.2_dev` |
 | Inference server | `github.com/ambientlight/sglang` | `feat/sm120-mxfp4-w4a4-moe` |
 
-**1. Serve the model** (4× RTX PRO 6000, SM120) — endpoint on `:8000` from
-[`launch-single.sh`](../../../bench/deepseek-v4-flash_W300_TP4_sglang/launch-single.sh)
-(thinking + MAX effort + `--reasoning-parser deepseek-v4` + `--tool-call-parser deepseekv4`) +
-[`sglang-single.yaml`](../../../bench/deepseek-v4-flash_W300_TP4_sglang/sglang-single.yaml)
-(1M context, mrr 16). From the sglang fork's venv:
+**1. Serve the model** (4× RTX PRO 6000, SM120) — endpoint on `:8000`. The unified
+Docker image bakes the whole stack (native MXFP4 MoE + HMMA sparse attention +
+`--reasoning-parser deepseek-v4` + `--tool-call-parser deepseekv4`):
 
 ```bash
-bash bench/deepseek-v4-flash_W300_TP4_sglang/launch-single.sh   # wait for /v1/models
+docker run --rm --gpus all --ipc=host -p 8000:8000 \
+  -e MODEL=dsv4 \
+  -v /mnt/hot/ambientlight/models/DeepSeek-V4-Flash:/model:ro \
+  ambientlight/sglang-sm120-mxfp4:latest        # wait for /v1/models (~8 min)
 ```
+
+(This eval was originally run from the venv launcher
+[`launch-single.sh`](../../../bench/deepseek-v4-flash_W300_TP4_sglang/launch-single.sh) +
+[`sglang-single.yaml`](../../../bench/deepseek-v4-flash_W300_TP4_sglang/sglang-single.yaml),
+1M context / mrr 16 / thinking + MAX effort — same server args the image bakes.)
 
 **2. Run the agent** over SWE-bench Verified (16 workers):
 

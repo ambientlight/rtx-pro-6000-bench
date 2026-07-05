@@ -79,13 +79,20 @@ patches; the inference fork carries the SM120 MXFP4 MoE + MXFP8 linear + MSA ker
 | Inference server | `github.com/ambientlight/sglang` | `feat/sm120-minimax-m3-mxfp4` |
 | MoE kernels | `github.com/ambientlight/flashinfer` | `ambientlight/mxfp4-fused-moe-minimax-m3` |
 
-**1. Serve the model** (4× RTX PRO 6000, SM120) — endpoint on `:8000` from
-[`launch-bwrap-highconc.sh`](../../../bench/minimax-m3-mxfp4_W300_TP4_sglang/launch-bwrap-highconc.sh)
-(`--reasoning-parser minimax-m3` + `--tool-call-parser minimax-m3`, fp8 KV, dynamic-M MoE):
+**1. Serve the model** (4× RTX PRO 6000, SM120) — endpoint on `:8000`. The unified
+Docker image bakes the whole stack (native MXFP4 MoE + MXFP8 linears + SM120 Triton
+MSA + `--reasoning-parser minimax-m3` + `--tool-call-parser minimax-m3`, fp8 KV, dynamic-M MoE):
 
 ```bash
-bash bench/minimax-m3-mxfp4_W300_TP4_sglang/launch-bwrap-highconc.sh   # wait for /v1/models
+docker run --rm --gpus all --ipc=host -p 8000:8000 \
+  -e MODEL=m3 \
+  -v /mnt/hot/ambientlight/models/minimax-m3-mxfp4:/model:ro \
+  ambientlight/sglang-sm120-mxfp4:latest        # wait for /v1/models (~8 min)
 ```
+
+(This eval was originally run from the bwrap launcher
+[`launch-bwrap-highconc.sh`](../../../bench/minimax-m3-mxfp4_W300_TP4_sglang/launch-bwrap-highconc.sh)
+— same server args the image bakes.)
 
 **2. Run the agent** over SWE-bench Verified:
 
