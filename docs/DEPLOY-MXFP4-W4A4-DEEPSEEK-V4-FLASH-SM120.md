@@ -38,109 +38,23 @@ Concurrency sweep at W300/TP4 ([`bench_sweep.log`](https://github.com/ambientlig
 
 ---
 
-## Installation
+## Quick start (Docker)
 
-Needs CUDA 12.8+ on `PATH` (host `nvcc` builds the HMMA kernel for `sm_120a`; this box has 13.1).
-
-```bash
-python3.12 -m venv ~/.venvs/dsv4 && source ~/.venvs/dsv4/bin/activate
-pip install torch==2.11.0+cu130 --index-url https://download.pytorch.org/whl/cu130
-pip install "flashinfer-python==0.6.11.post3" "flashinfer-cubin==0.6.11.post3"
-pip install --no-deps --force-reinstall "git+https://github.com/ambientlight/flashinfer.git@ambientlight/mxfp4-fused-moe"
-pip install --no-build-isolation "transformers==5.8.1" \
-  "git+https://github.com/ambientlight/sglang.git@feat/sm120-mxfp4-w4a4-moe#subdirectory=python"
-pip install --no-deps --force-reinstall "git+https://github.com/ambientlight/flashinfer.git@ambientlight/mxfp4-fused-moe"
-git clone -b feat/hmma-tensor-core-sparse-decode https://github.com/ambientlight/deepseek-v4-flash-sm120.git
-pip install -e deepseek-v4-flash-sm120 --no-deps --no-build-isolation
-
-# RTX PRO 6000 tuned W8A8 + MoE kernel configs (from the HMMA repo)
-# Without these sglang falls back to default tiles (the "Using default W8A8 ... sub-optimal" warning).
-SGL=$(python -c "import os,sglang;print(os.path.dirname(sglang.__file__))")
-cp deepseek-v4-flash-sm120/tuned-configs/w8a8/*.json "$SGL/srt/layers/quantization/configs/"
-cp deepseek-v4-flash-sm120/tuned-configs/moe/*.json  "$SGL/srt/layers/moe/moe_runner/triton_utils/configs/"
-
-# Model download
-# huggingface-cli download deepseek-ai/DeepSeek-V4-Flash --local-dir ./DeepSeek-V4-Flash --local-dir-use-symlinks False
-
-# verify (flashinfer-cubin stays 0.6.12 vs fork 0.6.13, so bypass the version guard)
-export FLASHINFER_DISABLE_VERSION_CHECK=1
-python -c "from flashinfer.fused_moe.cute_dsl.blackwell_sm12x import sm120_moe_supported_quant_modes as f; assert 'mxfp4' in f(); print('flashinfer mxfp4 OK')"
-python -c "from sglang.srt.layers.quantization.mxfp4_w4a4_moe import Mxfp4W4A4MoEMethod; print('sglang method OK')"
-python -c "from deepseek_v4_kernel.ops import sparse_decode_fwd, sparse_prefill_fwd; print('hmma decode + prefill kernels OK')"
-```
-
-### Additions
-
-Three forks, all gated SM120-only:
-
-- **FlashInfer** [ambientlight/mxfp4-fused-moe](https://github.com/ambientlight/flashinfer/tree/ambientlight/mxfp4-fused-moe) ([#3541](https://github.com/flashinfer-ai/flashinfer/pull/3541), draft) — CuTe-DSL fused-SwiGLU `MmaMXF4Op` MXFP4 MoE kernels + the `sm120_moe_supported_quant_modes()` capability probe.
-- **SGLang** [feat/sm120-mxfp4-w4a4-moe](https://github.com/ambientlight/sglang/tree/feat/sm120-mxfp4-w4a4-moe) — `Mxfp4W4A4MoEMethod` (+ shared E8M0 swizzle), the `fp8.py` feature-probe that auto-selects it, the `SGLANG_SM120_SPARSE_DECODE` / `SGLANG_SM120_SPARSE_PREFILL` attention toggles, and the capture-safe indexer routing.
-- [sparse_decode_kernel.cuh](https://github.com/ambientlight/deepseek-v4-flash-sm120/blob/feat/hmma-tensor-core-sparse-decode/csrc/sm120/decode/sparse_decode_kernel.cuh) + [sparse_prefill_kernel.cuh](https://github.com/ambientlight/deepseek-v4-flash-sm120/blob/feat/hmma-tensor-core-sparse-decode/csrc/sm120/prefill/sparse_prefill_kernel.cuh) HMMA kernels from [OxSero/deepseek-v4-flash-sm120 fork](https://github.com/ambientlight/deepseek-v4-flash-sm120) that was built against during the hillclimb. Both use warp-level `mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32`. (SM120 has no `wgmma` (SM90) or `tcgen05` (SM100)).
-
----
-
-## Launch
+The unified image [`ambientlight/sglang-sm120-mxfp4`](https://hub.docker.com/r/ambientlight/sglang-sm120-mxfp4)
+bakes all three forks (flashinfer MXFP4 MoE + sglang + the HMMA sparse-attention kernel) for `sm_120a`.
+Mount the checkpoint at `/model` and serve with `MODEL=dsv4`:
 
 ```bash
-source ~/.venvs/dsv4/bin/activate
-# The HMMA kernel is a pip-installed package (Installation step), so no PYTHONPATH is
-# needed. The version guard is required (flashinfer-cubin 0.6.12 vs fork 0.6.13).
-
-# --- selection ---
-export SGLANG_SM120_SPARSE_DECODE=hmma           # sparse attention, default path (decode + prefill <= 11673 tok)
-export SGLANG_SM120_SPARSE_PREFILL=hmma           # sparse attention, large-batch path (prefill > 11673 tok)
-#   MoE method auto-selects via the FlashInfer feature-probe — NO SGLANG_MXFP4_W4A4 env var.
-
-# SM120+DeepseekV4 auto-sets FP8_WO_A_GEMM, USE_TOPK_V2, TILELANG_MHC_PRE,
-# DEEPGEMM_HC_PRENORM, FP8_PAGED_MQA_LOGITS_TORCH at startup — no need to export them.
-export SGLANG_OPT_USE_TILELANG_INDEXER=1        # default off; the fast SM120 indexer
-export SGLANG_OPT_USE_TILELANG_MHC_POST=1
-export SGLANG_SM120_INDEXER_SPLIT=1             # split-KV indexer
-export SGLANG_ENABLE_JIT_DEEPGEMM=0             # no SM120 DeepGEMM recipe
-export SGLANG_OPT_USE_MULTI_STREAM_OVERLAP=0    # breaks CUDA-graph capture on SM120
-export SGLANG_OPT_USE_FUSED_HASH_TOPK=0         # SM120 dtype mismatch
-
-# --- reasoning (thinking + MAX effort; pairs with --reasoning-parser deepseek-v4 below) ---
-export SGLANG_DEFAULT_THINKING=1                # thinking mode on
-export SGLANG_DSV4_REASONING_EFFORT=max         # inject the MAX-effort prefix (both required)
-# Two parsers below, both required for an agentic tool-calling client:
-#   --reasoning-parser deepseek-v4  strips <think>…</think> into reasoning_content
-#   --tool-call-parser deepseekv4   parses the model's <｜DSML｜…> markup into structured
-#     tool_calls (without it the calls return as raw content and the agent can't act on them)
-
-# --- version guards ---
-export FLASHINFER_DISABLE_VERSION_CHECK=1
-export SGLANG_SKIP_SGL_KERNEL_VERSION_CHECK=1
-export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
-
-# --- NCCL (PCIe, no NVLink) ---
-export NCCL_PROTO=LL NCCL_ALGO=Ring NCCL_MIN_NCHANNELS=8 NCCL_NTHREADS=512
-export CUDA_VISIBLE_DEVICES=0,1,2,3
-
-python -m sglang.launch_server \
-  --model-path ./DeepSeek-V4-Flash \
-  --served-model-name deepseek-v4-flash \
-  --tp 4 --trust-remote-code --host 0.0.0.0 --port 8000 \
-  --context-length 1048576 --mem-fraction-static 0.90 \
-  --max-running-requests 16 \
-  --kv-cache-dtype fp8_e4m3 \
-  --moe-runner-backend triton \
-  --chunked-prefill-size 8192 --page-size 256 \
-  --cuda-graph-max-bs 16 --cuda-graph-bs 1 2 4 8 16 \
-  --disable-custom-all-reduce --disable-shared-experts-fusion \
-  --dsa-topk-backend torch \
-  --reasoning-parser deepseek-v4 \
-  --tool-call-parser deepseekv4 \
-  --watchdog-timeout 3600 --log-level info
+docker run --rm --gpus all --ipc=host -p 8000:8000 \
+  -e MODEL=dsv4 \
+  -v /mnt/hot/ambientlight/models/DeepSeek-V4-Flash:/model:ro \
+  ambientlight/sglang-sm120-mxfp4:latest        # OpenAI API on :8000, ~8 min to /v1/models
 ```
 
-This is the [`launch-single.sh`](../bench/deepseek-v4-flash_W300_TP4_sglang/launch-single.sh) /
-[`sglang-single.yaml`](../bench/deepseek-v4-flash_W300_TP4_sglang/sglang-single.yaml) recipe — the
-config used for the [SWE-bench Verified eval](#validation-swe-bench-verified). The concurrency
-**Performance** sweep below instead used `--max-running-requests 128 --mem-fraction-static 0.80
---chunked-prefill-size 16384 --cuda-graph-bs 1…128` (higher batch for throughput).
+- All server flags (`CONTEXT_LENGTH`, `MAX_RUNNING`, `KV_CACHE_DTYPE`, …) and the SM120/reasoning env are baked into the entrypoint and overridable via `-e`. The optimized PCIe NCCL config is applied automatically.
+- Get the weights: `huggingface-cli download deepseek-ai/DeepSeek-V4-Flash --local-dir /mnt/hot/ambientlight/models/DeepSeek-V4-Flash`
 
-Startup ~5 min (weight load + CUDA-graph capture across the bs 1…16 ladder).
+Build the image yourself from [`docker/sm120-unified/`](../docker/sm120-unified/) (`./build.sh`).
 
 ---
 

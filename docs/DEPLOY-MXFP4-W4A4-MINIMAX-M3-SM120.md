@@ -17,11 +17,6 @@ Unlike the DSV4 recipe, **M3 does NOT use a custom HMMA attention kernel** — i
 on the stock sglang SM120 Triton kernels (block-sparse, two-step indexer→main). Only the **MoE** and the
 **MXFP8 linears** are custom on this stack.
 
-> **Status:** correctness done + quality-validated (GSM8K 40/41 = 97.6%, greedy) + **agentic-eval validated
-> (SWE-bench Verified 374/500 = 74.8%, mini-swe-agent v2.4.2, temp 1.0)**. Throughput is measured (decode +
-> 1M-context scaling below). The decode path is, post-NCCL-fix, compute-bound (MXFP8-linear + MoE), not
-> collective-bound.
-
 ---
 
 ## Specs
@@ -71,130 +66,24 @@ are full precision.
 
 ---
 
-## Installation
+## Quick start (Docker)
 
-The dev loop runs everything **inside the image rootfs under bwrap** with the repo flashinfer injected on
-`PYTHONPATH` — no venv build. The edits below are already applied in the rootfs (`git status` in
-`/mnt/hot/minimax-m3-rootfs/sgl-workspace/sglang` tracks them); this section documents what they are so the
-stack can be rebuilt or baked into a permanent image.
-
-```bash
-# Repo flashinfer (native mxfp4 + the swigluoai epilogue) — bound at its REAL abs path so its
-# data/{csrc,cutlass,cccl,include} ABSOLUTE symlinks resolve (binding elsewhere dangles them).
-REPO_FI=/mnt/hot/ambientlight/repos/flashinfer
-# PYTHONPATH=$REPO_FI:/sgl-workspace/sglang/python overrides the image's baked 0.6.12.
-
-# Verify (inside the sandbox):
-export FLASHINFER_DISABLE_VERSION_CHECK=1
-python -c "from flashinfer.fused_moe.cute_dsl.blackwell_sm12x import sm120_moe_supported_quant_modes as f; assert 'mxfp4' in f(); print('flashinfer mxfp4 OK')"
-python -c "from sglang.srt.layers.quantization.mxfp4_w4a4_moe import Mxfp4W4A4MoEMethod; print('sglang MoE method OK')"
-python -c "from sglang.srt.layers.quantization.compressed_tensors.schemes import CompressedTensorsW8A8Mxfp8; print('sglang MXFP8 linear OK')"
-```
-
-### Additions
-
-Two layers of edits over the stock image (all SM120-gated; A/B fallbacks preserved):
-
-- **FlashInfer** (`/mnt/hot/ambientlight/repos/flashinfer`, `.../fused_moe/cute_dsl/blackwell_sm12x/`):
-  - added a **`swigluoai` epilogue** branch to `moe_{static,micro,dynamic}_kernel.py` computing
-    `g=fmin(g,L); u=clamp(u,±L); g·sigmoid(α·g)·(u+β)` (+ the `fmin_f32` import in the micro kernel);
-  - threaded `(swiglu_alpha, swiglu_limit, swiglu_beta)` as compile-time consts through `launch_sm120_moe`,
-    `_get_{static,micro,dynamic}_kernel`, and the compile **cache-keys**;
-  - fixed `is_gated` to include `swigluoai` at 4 sites (else `n` doubles and `b_w13` mismatches).
-
-- **SGLang** (image rootfs `python/sglang/srt/`):
-  - **`layers/quantization/mxfp4_w4a4_moe.py`** (NEW) — `Mxfp4W4A4MoEMethod` + `Mxfp4W4A4MoEScheme`. Ported
-    from DSV4, then: **uint8 E8M0 scales passed verbatim** (no re-encode), `[w3,w1]` gate/up swap,
-    swigluoai params from `cfg.gemm1_*`, **dropped the rsf output re-multiply** (TopK already bakes ×2.0),
-    `SGLANG_M3_FORCE_STATIC` + chunk-prefill-over-M (avoids the dynamic-kernel SM120 smem overflow), zero-init
-    output. `apply()` calls `launch_sm120_moe(quant_mode="mxfp4", activation="swigluoai", swiglu_*=cfg.gemm1_*)`.
-  - **`layers/quantization/mxfp4_sm120_common.py`** (NEW) — `swizzle_weight_scale_mxf4` helper.
-  - **`layers/quantization/compressed_tensors/schemes/compressed_tensors_w8a8_mxfp8.py`** (NEW) —
-    `CompressedTensorsW8A8Mxfp8`, the MXFP8 weight-only LINEAR scheme routing M3's attn/dense/shared-expert
-    `mxfp8-quantized` linears to `mxfp8_native.dot_scaled_mxfp8_blockscaled_linear` (uint8 E8M0 scales verbatim).
-  - **`models/minimax_m3_vl.py`** (EDIT) — **THE loader fix**: rename `.weight_packed`→`.weight` /
-    `.weight_scale`→`.weight_scale_inv` for `mlp.experts.` before the expert-mapping loop (else every routed
-    expert is silently skipped → MoE runs on uninitialized memory); **plus a boot-time load-completeness guard**
-    that raises if any expert weight resolves to no destination param; plus `packed_modules_mapping`
-    (`qkv_proj`/`index_qkv_proj`/`gate_up_proj`).
-  - **`layers/quantization/compressed_tensors/compressed_tensors.py`** (EDIT) — `_is_mxfp4_weight_only` +
-    `_is_mxfp8_weight_only` detectors; **MXFP4-before-wNa16** reorder in `get_moe_scheme`; MXFP8-before-wNa16 in
-    `_get_scheme_from_parts`; `mlp.shared_experts`→`block_sparse_moe.shared_experts` normalize.
-  - **`compressed_tensors/utils.py`** (EDIT) — `_match_fused_layer` longest-suffix match (fixes
-    `index_qkv_proj` colliding with `qkv_proj`).
-  - **`compressed_tensors/schemes/__init__.py`** (EDIT) — export the MXFP8 scheme.
-
----
-
-## Launch
-
-The production launcher is [`bench/minimax-m3-mxfp4_W300_TP4_sglang/launch-bwrap-highconc.sh`](../bench/minimax-m3-mxfp4_W300_TP4_sglang/launch-bwrap-highconc.sh)
-(high-concurrency: `--max-running-requests 32`, decode graphs to bs=32). It runs `sglang.launch_server` inside
-bwrap over the image rootfs. The decisive non-obvious settings:
+The unified image [`ambientlight/sglang-sm120-mxfp4`](https://hub.docker.com/r/ambientlight/sglang-sm120-mxfp4)
+bakes the flashinfer MXFP4-MoE + swigluoai fork and the sglang M3 stack (MXFP8 linears, compressed-tensors
+routing, the loader fix) for `sm_120a`. Mount the checkpoint at `/model` and serve with `MODEL=m3`:
 
 ```bash
-# --- repo flashinfer (native mxfp4 + swigluoai), bound at its REAL path so data/ symlinks resolve ---
---ro-bind /mnt/hot/ambientlight/repos/flashinfer /mnt/hot/ambientlight/repos/flashinfer
---setenv PYTHONPATH "/mnt/hot/ambientlight/repos/flashinfer:/sgl-workspace/sglang/python"
---setenv FLASHINFER_DISABLE_VERSION_CHECK 1
---setenv FLASHINFER_WORKSPACE_BASE /mnt/hot/minimax-m3-ficache   # writable JIT cache
-
-# --- NCCL transport (THE perf-critical block; PCIe, no NVLink, under bwrap) ---
---ro-bind /sys /sys                       # PCIe-topology detection -> direct P2P (maxBw 1.2->48)
---setenv NCCL_SHM_DISABLE   0             # SHM ON: legacy-IPC P2P, 45us/12KB (vs 277us on socket/lo)
---setenv NCCL_CUMEM_ENABLE  0             # legacy IPC path (cuMem fabric handles hit CUDA-801 under bwrap)
---setenv NCCL_P2P_DISABLE   0
---setenv NCCL_IB_DISABLE    1
---setenv NCCL_SOCKET_IFNAME lo            # single-host TP=4 loopback; else NCCL picks a dead host veth -> bind-crash
-
-# --- MoE kernel routing ---
---setenv SGLANG_M3_FORCE_STATIC 1         # route large-prefill to the smem-safe static MoE kernel
-# SGLANG_M3_FORCE_MARLIN=1  -> A/B back to slow Marlin W4A16 (reference only)
-
-python -m sglang.launch_server \
-  --model-path /mnt/hot/ambientlight/models/minimax-m3-mxfp4 \
-  --tokenizer-path /mnt/hot/ambientlight/models/minimax-m3-mxfp4 \
-  --trust-remote-code --host 0.0.0.0 --port 8000 --served-model-name minimax-m3 \
-  --tp-size 4 --context-length 250000 --kv-cache-dtype fp8_e4m3 \
-  --quantization compressed-tensors \
-  --reasoning-parser minimax-m3 --tool-call-parser minimax-m3 \
-  --disable-shared-experts-fusion \
-  --cuda-graph-backend-decode full --cuda-graph-backend-prefill disabled \
-  --cuda-graph-max-bs-decode 32 --max-running-requests 32 \
-  --chunked-prefill-size 4096 --max-prefill-tokens 16384 \
-  --mem-fraction-static 0.90 \
-  --watchdog-timeout 1200 --skip-server-warmup
+docker run --rm --gpus all --ipc=host -p 8000:8000 \
+  -e MODEL=m3 \
+  -v /mnt/hot/ambientlight/models/minimax-m3-mxfp4:/model:ro \
+  ambientlight/sglang-sm120-mxfp4:latest        # OpenAI API on :8000, ~8 min to /v1/models
 ```
 
-**Boot ≈ 7–9 min**: weight load (~66 s, ~221 GB, KV ~567k tokens at 250k ctx) + decode-graph capture across
-the bs `[1,2,4,8,12,16,24,32]` ladder (per-shape CuteDSL MoE JIT). `--skip-server-warmup` is **required** (else
-the post-capture warmup forward's first-decode JIT trips the watchdog). The **first real request** absorbs the
-first-decode JIT (~80 s) once; subsequent requests run cached.
+- The image runs in a real container (native `/sys`), so the optimized PCIe NCCL config (see the [environment variable reference](#environment-variable-reference)) applies without the bwrap `--ro-bind /sys` workaround — it's baked into the entrypoint.
+- Server flags (`CONTEXT_LENGTH`, `MEM_FRACTION_STATIC` default 0.95, `KV_CACHE_DTYPE=fp8_e4m3`, reasoning/tool-call parsers, `SGLANG_M3_FORCE_STATIC`) are baked into the entrypoint and overridable via `-e`.
+- Get the weights: `huggingface-cli download olka-fi/MiniMax-M3-MXFP4 --local-dir /mnt/hot/ambientlight/models/minimax-m3-mxfp4`
 
-Variant: [`launch-bwrap.sh`](../bench/minimax-m3-mxfp4_W300_TP4_sglang/launch-bwrap.sh) (production, cap-4).
-`launch-bwrap-highconc.sh` honors `KV_CACHE_DTYPE` (set to `fp8_e4m3`
-for the fp8 KV path below).
-
-### FP8 KV cache (`--kv-cache-dtype fp8_e4m3`)
-
-The official MiniMax-M3 vLLM recipe documents fp8 KV as **lossless across the full native context**, and it is
-the recommended setting here. Measured at 250k ctx / TP4 / `mem-fraction-static 0.90`:
-
-| fp8_e4m3 KV | value |
-|---|---|
-| K + V size / GPU | 6.45 + 6.45 = 12.9 GB |
-| KV pool capacity | 901,657 tokens |
-| Coherence / quality | identical to full precision (Tokyo / 42 / GSM8K unchanged) |
-
-**It required a one-line-per-kernel sglang edit.** M3's main sparse-attention Triton kernels
-(`minimax_sparse_ops/{decode,prefill}/topk_sparse.py`) already contained the fp8 widening branch
-(`k = k.to(q.dtype)` — the fp8 KV is **unit-scaled**, so the widening cast to the Q compute dtype is the full,
-lossless dequant) but gated it to AMD HIP (`is_fp8 = _is_hip and ...`). The edit lifts that gate to run on
-CUDA/SM120. The **indexer** kernels (`flash_with_topk_idx.py`) have no fp8 path, but they never see fp8:
-`MiniMaxSparseKVPool` is constructed `dtype=kv_cache_dtype, index_dtype=self.dtype` — only the **main** KV
-follows `--kv-cache-dtype`, while the small **index** KV keeps the model compute dtype. So
-`--kv-cache-dtype fp8_e4m3` is safe end-to-end with just the two main-attn gate edits. (sglang logs "Using FP8
-KV cache but no scaling factors provided. Defaulting to 1.0" — expected and correct for M3's unit-scaled KV.)
+Build it yourself from [`docker/sm120-unified/`](../docker/sm120-unified/) (`./build.sh`).
 
 ---
 
@@ -258,26 +147,6 @@ is the activation mechanism. `SGLANG_M3_FORCE_MARLIN=1` forces the (slow) refere
 | `--skip-server-warmup` | flag | else the warmup forward's first-decode JIT trips the watchdog |
 | `--watchdog-timeout` | `1200` | absorbs the one-time first-decode JIT |
 | `--disable-shared-experts-fusion` | flag | keep E = 128 (the MXFP4 scheme asserts it) |
-
-### NCCL transport — the single biggest perf fix on this rig
-
-M3 is TP=4 over PCIe (no NVLink), so every layer does ~2 all-reduces (RowParallel out_proj + down_proj) ×
-60 layers ≈ ~120 collectives/token, each a tiny ~12 KB bf16 payload → **latency-bound, not bandwidth-bound**.
-With `NCCL_SHM_DISABLE=1` (the original boot-debugging setting) NCCL fell back to **TCP socket-loopback** at
-**277 µs/all-reduce** — ~90 % spin-wait — which a GPU-busy profiler mislabels as "85 % NCCL-bound." The fix
-(`NCCL_SHM_DISABLE=0` + `NCCL_CUMEM_ENABLE=0` + bind `/sys`) restores **direct P2P at 45 µs (6×)** and is
-the largest single lever in this stack's history (decode aggregate jumped 2.8–10× across concurrency).
-
-**This is the fix that DEBUNKED the "85 % NCCL is the whole perf story" verdict — it was a transport artifact,
-not a floor.** Post-fix, NCCL drops to **~13 %** of single-stream decode and the path becomes **compute-bound**.
-The conc-1 decode breakdown right after the NCCL fix was MXFP8-linear ~42 % + MoE ~30 % + NCCL ~13 %; the
-later **split-K MXFP8** work (see Performance) then cut that MXFP8-linear share ~3.3× (+25 % conc-1), so the
-current compute split is lower still. The remaining perf levers are the compute kernels (MXFP8 `dot_scaled`,
-MoE micro/static), **not** collectives. Micro-bench:
-[`spikes/m3_nccl_allreduce_bench.py`](../spikes/m3_nccl_allreduce_bench.py) via
-[`run-nccl-bench-sys.sh`](../spikes/run-nccl-bench-sys.sh). flashinfer/aiter all-reduce **fusion** (which would
-cut the collective *count*) is SM90/SM100/AMD-gated — unavailable on SM120, so the collective count can't be
-reduced further on this rig.
 
 ---
 
@@ -455,28 +324,6 @@ the agent needs to escape failed-approach loops (a single trajectory hit 250 tur
 | Quality (`spikes/m3_gsm8k_live.py`, GSM8K temp=0) | **40/41 = 97.6%**, 0 truncations |
 | Agentic eval (mini-swe-agent v2.4.2, SWE-bench Verified) | **374/500 = 74.8%** (temp 1.0, native tool-calling; ±2 across re-scores) |
 | Load-completeness guard (`spikes/m3_load_guard_sim.py`) | fires on the original `weight_packed` silent-skip; silent on the fix |
-
----
-
-## Known gotchas
-
-- **The garble root cause was the loader, not any kernel.** M3's checkpoint names experts
-  `...experts.N.wX.weight_packed`; `FusedMoE.make_expert_params_mapping` produced `w13_weight_packed`, matching
-  no registered param → `if new_name not in params_dict: continue` **silently dropped every routed-expert
-  weight** → MoE ran on uninitialized memory (fluent-but-random, prompt-independent output). Fixed by the
-  rename + a boot-time completeness guard. Every isolated kernel test was green because none exercised the
-  production `load_weights` path.
-- **E8M0 scales are raw uint8**, not float. Declaring the scale param float32 makes the HF loader copy byte
-  `121` as the value `121.0` and a `.to(float8_e8m0fnu)` re-encode corrupts every block. Declare **uint8**, pass
-  verbatim — in both the MoE bridge and the MXFP8 linear scheme.
-- **rsf double-apply**: `routed_scaling_factor=2.0` is baked into `topk_weights` by TopK
-  (`apply_routed_scaling_factor_on_output`); the bridge **drops** the DSV4 output re-multiply or output is 2×.
-- **Dynamic MoE kernel overflows SM120 smem** at k=6144 (`115712 > 101376`); `SGLANG_M3_FORCE_STATIC=1` +
-  chunk-prefill-over-M keep every batch on the static/micro kernels.
-- **repo flashinfer must bind at its REAL abs path** — its `data/{csrc,cutlass,cccl,include}` are absolute
-  symlinks that dangle if bound elsewhere (the attention-backend C++ JIT throws `FileNotFoundError`).
-- **NCCL under bwrap**: pin `NCCL_SOCKET_IFNAME=lo`, set `NCCL_SHM_DISABLE=0 + NCCL_CUMEM_ENABLE=0`, and bind
-  `/sys` — see the NCCL section. This is the single biggest perf lever on this rig.
 
 ---
 

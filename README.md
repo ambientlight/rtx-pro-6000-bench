@@ -106,26 +106,25 @@ against any OpenAI-compatible endpoint (vLLM **or** sglang). It invokes the benc
 `python -m vllm.entrypoints.cli.main bench serve` (so a stale `vllm` console script doesn't block
 runs); override with `--bench-cmd` if needed.
 
-### sglang (DeepSeek-V4-Flash)
+### sglang models (Docker)
 
-DeepSeek-V4-Flash is served by our sglang fork (MXFP4 W4A4 + HMMA sparse decode on sm_120). Full
-setup: [docs/DEPLOY-MXFP4-W4A4-DEEPSEEK-V4-FLASH-SM120.md](docs/DEPLOY-MXFP4-W4A4-DEEPSEEK-V4-FLASH-SM120.md).
-Launch the server, then sweep with `--tokenizer` pointed at the checkpoint:
+Both sglang models — DeepSeek-V4-Flash and MiniMax-M3 — are served by our SM120 image
+[`ambientlight/sglang-sm120-mxfp4`](https://hub.docker.com/r/ambientlight/sglang-sm120-mxfp4). Build + details: [`docker/sm120-unified/`](docker/sm120-unified/).
 
 ```bash
-# 1. Start the server (config + env in bench/deepseek-v4-flash_W300_TP4_sglang/)
-bash bench/deepseek-v4-flash_W300_TP4_sglang/launch.sh   # wait for /v1/models (~2 min)
+# 1. Serve (server metrics on by default)
+docker run --rm --gpus all --ipc=host -p 8000:8000 -e MODEL=dsv4 \
+  -v /mnt/hot/ambientlight/models/DeepSeek-V4-Flash:/model:ro \
+  ambientlight/sglang-sm120-mxfp4:latest       # wait for /v1/models (~8 min)
+# MiniMax-M3:  -e MODEL=m3  -v /mnt/hot/ambientlight/models/minimax-m3-mxfp4:/model:ro
 
-# 2. Matrix sweep (output 1024, step-size 8 → c1,2,4,8,16,24,…,128; matches the vLLM models)
+# 2. Matrix sweep against the :8000 endpoint (output 1024, step-size 8 → c1,2,4,8,16,24,…,128)
 bench-sweep --matrix --telemetry \
   --model-id deepseek-v4-flash --watt 300 \
   --tokenizer /mnt/hot/ambientlight/models/DeepSeek-V4-Flash \
   --input-lens 2048,4096,8192,16384,32768,65536 --output-len 1024 \
   --step-size 8 --num-prompts 128 --max-error-rate 0.1
 ```
-
-The sglang server **must** be launched with `enable_metrics: true` (set in `sglang.yaml`) for telemetry
-to capture KV-cache % and request counts; GPU power/util work regardless.
 
 ## Usage
 
@@ -256,10 +255,10 @@ served via:
 PYTORCH_ALLOC_CONF=expandable_segments:True vllm serve /path/to/model --config /path/to/model/vllm.yaml --port 8000 -O3
 ```
 
-**sglang models:**
+**sglang models** — both served by  [`ambientlight/sglang-sm120-mxfp4`](https://hub.docker.com/r/ambientlight/sglang-sm120-mxfp4) (`-e MODEL={dsv4|m3}`; see [`docker/sm120-unified/`](docker/sm120-unified/)):
 
-- [DeepSeek-V4-Flash](bench/deepseek-v4-flash_W300_TP4_sglang/sglang-single.yaml) — checkpoint: [deepseek-ai/DeepSeek-V4-Flash](https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash) (native MXFP4 W4A4); native MXFP4 fused MoE + HMMA sparse-attention on SM120 via three forks — [setup](docs/DEPLOY-MXFP4-W4A4-DEEPSEEK-V4-FLASH-SM120.md). Served via [`launch-single.sh`](bench/deepseek-v4-flash_W300_TP4_sglang/launch-single.sh).
-- [MiniMax-M3](bench/minimax-m3-mxfp4_W300_TP4_sglang/launch-bwrap-highconc.sh) — checkpoint: [olka-fi/MiniMax-M3-MXFP4](https://huggingface.co/olka-fi/MiniMax-M3-MXFP4) (community MXFP4 experts + MXFP8 linears); MXFP4 fused MoE (clamped SwiGLU-OAI) + MXFP8 split-K linears + SM120 Triton MSA block-sparse attention — [setup](docs/DEPLOY-MXFP4-W4A4-MINIMAX-M3-SM120.md). Served via [`launch-bwrap-highconc.sh`](bench/minimax-m3-mxfp4_W300_TP4_sglang/launch-bwrap-highconc.sh).
+- [DeepSeek-V4-Flash](bench/deepseek-v4-flash_W300_TP4_sglang/sglang-single.yaml) — checkpoint: [deepseek-ai/DeepSeek-V4-Flash](https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash) (native MXFP4 W4A4); native MXFP4 fused MoE + HMMA sparse-attention on SM120. Serve with `-e MODEL=dsv4`.
+- MiniMax-M3 — checkpoint: [olka-fi/MiniMax-M3-MXFP4](https://huggingface.co/olka-fi/MiniMax-M3-MXFP4) (community MXFP4 experts + MXFP8 linears); MXFP4 fused MoE (clamped SwiGLU-OAI) + MXFP8 split-K linears + SM120 Triton MSA block-sparse attention. Serve with `-e MODEL=m3`.
 
 ### Log Files
 
