@@ -15,7 +15,7 @@ LABEL org.opencontainers.image.title="sglang-sm120-mxfp4" \
 ARG FLASHINFER_REF=ambientlight/sm120-mxfp4-unified
 ARG FLASHINFER_SHA=eb68b4d865a497afd5d26ce02e60c4ab5075361e
 ARG SGLANG_REF=feat/sm120-mxfp4-unified
-ARG SGLANG_SHA=c0884fb5a8a9b225059a4357b67db7f27234bf86
+ARG SGLANG_SHA=241ff6d17ea71c1aa3d3fdc962126c933c1716a6
 ARG HMMA_REF=feat/hmma-tensor-core-sparse-decode
 ARG HMMA_SHA=08bfa86aef9e7068c8ec5da3c208f4e6cea6db07
 
