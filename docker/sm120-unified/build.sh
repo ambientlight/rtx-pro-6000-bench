@@ -24,10 +24,11 @@ REGISTRY="${REGISTRY:-ambientlight}"
 NAME="${NAME:-sglang-sm120-mxfp4}"
 CUDA_BASE="${CUDA_BASE:-nvidia/cuda:13.1.1-devel-ubuntu24.04}"
 CU_TAG="cu$(printf '%s' "${CUDA_BASE}" | sed -E 's#.*cuda:([0-9]+)\.([0-9]+).*#\1\2#')"
-DATE_TAG="${DATE_TAG:-2026.08.0}"
+DATE_TAG="${DATE_TAG:-2026.07.3}"
 REPO="${REGISTRY}/${NAME}"
-# moving `latest` + fully-pinned (date + cuda + sm120a arch) tags.
-TAGS=( "${REPO}:latest" "${REPO}:${DATE_TAG}-${CU_TAG}-sm120a" )
+# This legacy builder publishes only its pinned July tag. `latest` belongs to
+# the benchmark-qualified image under ../sglang-main-sm120/.
+TAGS=( "${REPO}:${DATE_TAG}-${CU_TAG}-sm120a" )
 PUSH="${PUSH:-0}"
 
 # Build tunables (env-overridable). RAM ~= JOBS * 8 GB.

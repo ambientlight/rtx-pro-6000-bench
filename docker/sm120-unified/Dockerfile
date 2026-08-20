@@ -1,8 +1,13 @@
+# LEGACY W4A4 unified image. The current benchmark-qualified DeepSeek-V4 W4A8
+# release is ambientlight/sglang-sm120-mxfp4:2026.08.0-cu130-sm120a and is
+# defined in ../sglang-main-sm120/. Do not publish this legacy build as :latest.
+#
 # Unified SM120 image — serves BOTH DeepSeek-V4-Flash AND MiniMax-M3 (TP=4)
 # Pick the model at `docker run` via MODEL={dsv4|m3}
 # Requires NVIDIA Container Toolkit + driver >= 595
 #   docker run --rm --gpus all --ipc=host -p 8000:8000 -e MODEL=dsv4 \
-#     -v /path/DeepSeek-V4-Flash:/model:ro sm120-unified:latest
+#     -v /path/DeepSeek-V4-Flash:/model:ro \
+#     ambientlight/sglang-sm120-mxfp4:2026.07.3-cu131-sm120a
 
 ARG CUDA_BASE=nvidia/cuda:13.1.1-devel-ubuntu24.04
 FROM ${CUDA_BASE}

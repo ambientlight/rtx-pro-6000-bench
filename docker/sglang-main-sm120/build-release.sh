@@ -2,7 +2,7 @@
 set -euo pipefail
 
 HERE=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
-IMAGE=${IMAGE:-ambientlight/sglang-sm120-mxfp4:2026.08.20-main-b03ac355-cu130}
+IMAGE=${IMAGE:-ambientlight/sglang-sm120-mxfp4:2026.08.0-cu130-sm120a}
 
 docker build \
   --pull=false \
