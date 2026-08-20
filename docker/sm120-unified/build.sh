@@ -24,7 +24,7 @@ REGISTRY="${REGISTRY:-ambientlight}"
 NAME="${NAME:-sglang-sm120-mxfp4}"
 CUDA_BASE="${CUDA_BASE:-nvidia/cuda:13.1.1-devel-ubuntu24.04}"
 CU_TAG="cu$(printf '%s' "${CUDA_BASE}" | sed -E 's#.*cuda:([0-9]+)\.([0-9]+).*#\1\2#')"
-DATE_TAG="${DATE_TAG:-2026.07.2}"
+DATE_TAG="${DATE_TAG:-2026.08.0}"
 REPO="${REGISTRY}/${NAME}"
 # moving `latest` + fully-pinned (date + cuda + sm120a arch) tags.
 TAGS=( "${REPO}:latest" "${REPO}:${DATE_TAG}-${CU_TAG}-sm120a" )

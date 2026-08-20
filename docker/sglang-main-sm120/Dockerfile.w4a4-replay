@@ -1,0 +1,25 @@
+ARG BASE_IMAGE=ambientlight/sglang-main-sm120:b03ac355-cu130-w4a4-probe
+FROM ${BASE_IMAGE}
+
+ARG SGLANG_SHA=b03ac355e795b3a86b26b8732c47c0965fd71bbc
+ARG FLASHINFER_W4A4_SHA=eb68b4d865a497afd5d26ce02e60c4ab5075361e
+
+LABEL org.opencontainers.image.title="sglang-main-dsv4-sm120-w4a4-replay" \
+      org.opencontainers.image.description="Pinned SGLang main with native SM120 attention and replayed MXFP4 W4A4 MoE" \
+      org.opencontainers.image.revision="${SGLANG_SHA}" \
+      ai.sglang.comparison.role="main-native-attention-w4a4-moe-replay" \
+      ai.sglang.attention="main-deepseek-v4-sm120" \
+      ai.sglang.moe="flashinfer-sm120-mxfp4-w4a4" \
+      ai.sglang.w4a4.flashinfer-revision="${FLASHINFER_W4A4_SHA}"
+
+COPY patches/sglang-b03-w4a4-selection.patch /tmp/sglang-b03-w4a4-selection.patch
+RUN cd /opt/sglang-main \
+ && git apply --check /tmp/sglang-b03-w4a4-selection.patch \
+ && git apply /tmp/sglang-b03-w4a4-selection.patch \
+ && python3 -m compileall -q python/sglang/srt/layers/quantization/fp8.py \
+ && grep -q 'SGLANG_DSV4_SM120_W4A4' python/sglang/srt/layers/quantization/fp8.py
+
+ENV SGLANG_DSV4_SM120_W4A4=1 \
+    SGLANG_IMAGE_TAG=ambientlight/sglang-main-sm120:b03ac355-cu130-w4a4-replay
+
+RUN python3 -c "from sglang.srt.layers.quantization.mxfp4_w4a4_moe import Mxfp4W4A4MoEMethod, _flashinfer_has_native_mxfp4; assert _flashinfer_has_native_mxfp4(); print('latest-main W4A4 replay ready')"

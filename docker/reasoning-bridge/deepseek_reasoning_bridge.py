@@ -61,6 +61,18 @@ THINK_RE = re.compile(r"<think>.*?</think>\s*", re.DOTALL)
 # leading) tag with no matching partner — clean those when surfacing it as content.
 STRAY_THINK_RE = re.compile(r"</?think>\s*")
 
+# Claude Code prepends a volatile "x-anthropic-billing-header: cc_version=...;
+# cc_entrypoint=cli; cch=...;" block as the FIRST text block of the system prompt.
+# Its cc_version build-suffix and per-request `cch` hash change every turn, which
+# sits at the very front of the prompt and busts the whole radix (prefix) cache —
+# forcing a full re-prefill each turn. It is billing/correlation metadata the model
+# does not need, so we strip it entirely so the system-prompt prefix is byte-stable.
+BILLING_HEADER_RE = re.compile(r"x-anthropic-billing-header:.*?(?:\n|$)", re.DOTALL)
+
+
+def _is_billing_header_text(text: Any) -> bool:
+    return isinstance(text, str) and text.lstrip().startswith("x-anthropic-billing-header:")
+
 
 def canonical_json(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
@@ -80,8 +92,11 @@ def clean_inline_think(text: str | None) -> str | None:
 
 
 def strip_anthropic_thinking_blocks(content: Any, role: str | None = None) -> Any:
-    """Remove Anthropic thinking/redacted_thinking blocks from content arrays."""
+    """Remove Anthropic thinking/redacted_thinking blocks from content arrays, and
+    strip the volatile Claude Code x-anthropic-billing-header block (see
+    BILLING_HEADER_RE) so the prompt prefix stays byte-stable for radix caching."""
     if isinstance(content, str):
+        content = BILLING_HEADER_RE.sub("", content, count=1)
         return clean_inline_think(content) if role == "assistant" else content
 
     if not isinstance(content, list):
@@ -95,6 +110,10 @@ def strip_anthropic_thinking_blocks(content: Any, role: str | None = None) -> An
 
         block_type = block.get("type")
         if block_type in ("thinking", "redacted_thinking"):
+            continue
+
+        # Drop the volatile billing-header text block entirely.
+        if block_type == "text" and _is_billing_header_text(block.get("text")):
             continue
 
         new_block = deepcopy(block)

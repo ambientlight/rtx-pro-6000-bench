@@ -1,0 +1,49 @@
+# Compatibility probe: replay the existing W4A4 CuTe-DSL implementation into
+# the pinned latest-main control without selecting it for model loading yet.
+ARG MAIN_IMAGE=ambientlight/sglang-main-sm120:b03ac355-cu130-candidate
+ARG CUSTOM_IMAGE=ambientlight/sglang-sm120-mxfp4:latest
+
+FROM ${CUSTOM_IMAGE} AS custom_stack
+FROM ${MAIN_IMAGE}
+
+ARG FLASHINFER_SHA=eb68b4d865a497afd5d26ce02e60c4ab5075361e
+ARG SGLANG_W4A4_SHA=3e5151a1309fbe1759436a643071f2dd54d5fe28
+
+LABEL ai.sglang.comparison.role="w4a4-compatibility-probe" \
+      ai.sglang.w4a4.flashinfer-revision="${FLASHINFER_SHA}" \
+      ai.sglang.w4a4.sglang-revision="${SGLANG_W4A4_SHA}"
+
+# Keep FlashInfer 0.6.17 as the installed package (and retain its attention,
+# quantization, and CUTLASS modules), replacing only the five SM120 CuTe-DSL
+# MoE files that implement the native MXFP4 activation mode.
+COPY --from=custom_stack \
+  /opt/flashinfer/flashinfer/fused_moe/cute_dsl/blackwell_sm12x/__init__.py \
+  /usr/local/lib/python3.12/dist-packages/flashinfer/fused_moe/cute_dsl/blackwell_sm12x/__init__.py
+COPY --from=custom_stack \
+  /opt/flashinfer/flashinfer/fused_moe/cute_dsl/blackwell_sm12x/moe_dispatch.py \
+  /usr/local/lib/python3.12/dist-packages/flashinfer/fused_moe/cute_dsl/blackwell_sm12x/moe_dispatch.py
+COPY --from=custom_stack \
+  /opt/flashinfer/flashinfer/fused_moe/cute_dsl/blackwell_sm12x/moe_dynamic_kernel.py \
+  /usr/local/lib/python3.12/dist-packages/flashinfer/fused_moe/cute_dsl/blackwell_sm12x/moe_dynamic_kernel.py
+COPY --from=custom_stack \
+  /opt/flashinfer/flashinfer/fused_moe/cute_dsl/blackwell_sm12x/moe_micro_kernel.py \
+  /usr/local/lib/python3.12/dist-packages/flashinfer/fused_moe/cute_dsl/blackwell_sm12x/moe_micro_kernel.py
+COPY --from=custom_stack \
+  /opt/flashinfer/flashinfer/fused_moe/cute_dsl/blackwell_sm12x/moe_static_kernel.py \
+  /usr/local/lib/python3.12/dist-packages/flashinfer/fused_moe/cute_dsl/blackwell_sm12x/moe_static_kernel.py
+
+COPY --from=custom_stack \
+  /opt/sglang/python/sglang/srt/layers/quantization/mxfp4_sm120_common.py \
+  /opt/sglang-main/python/sglang/srt/layers/quantization/mxfp4_sm120_common.py
+COPY --from=custom_stack \
+  /opt/sglang/python/sglang/srt/layers/quantization/mxfp4_w4a4_moe.py \
+  /opt/sglang-main/python/sglang/srt/layers/quantization/mxfp4_w4a4_moe.py
+
+COPY patches/flashinfer-v0617-mxfp4-quantizer.patch /tmp/flashinfer-v0617-mxfp4-quantizer.patch
+RUN cd /usr/local/lib/python3.12/dist-packages \
+ && patch -p1 --forward < /tmp/flashinfer-v0617-mxfp4-quantizer.patch \
+ && python3 -c "from flashinfer.fused_moe.cute_dsl.blackwell_sm12x import sm120_moe_supported_quant_modes; assert 'mxfp4' in sm120_moe_supported_quant_modes(); print('FlashInfer W4A4 API:', sm120_moe_supported_quant_modes())" \
+ && python3 -c "from sglang.srt.layers.quantization.mxfp4_w4a4_moe import Mxfp4W4A4MoEMethod, _flashinfer_has_native_mxfp4; assert _flashinfer_has_native_mxfp4(); print('SGLang W4A4 method import OK')" \
+ && python3 -m compileall -q \
+      /opt/sglang-main/python/sglang/srt/layers/quantization/mxfp4_w4a4_moe.py \
+      /usr/local/lib/python3.12/dist-packages/flashinfer/fused_moe/cute_dsl/blackwell_sm12x

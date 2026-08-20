@@ -40,7 +40,8 @@ HF_CACHE=/mnt/hot/ambientlight/.cache/huggingface
 DSV4_MODEL_DIR=${DSV4_MODEL_DIR:-${MODELS_DIR}/DeepSeek-V4-Flash-0731}
 
 # ---- images ----------------------------------------------------------------
-IMG_DSV4=ambientlight/sglang-sm120-mxfp4:latest        # custom sm120 NVFP4 image
+# Benchmark-qualified SGLang main; IMG_DSV4 remains env-overridable.
+IMG_DSV4=${IMG_DSV4:-ambientlight/sglang-sm120-mxfp4:2026.08.20-main-b03ac355-cu130}
 IMG_BRIDGE=ambientlight/dsv4-reasoning-bridge:latest   # local reasoning-bridge relay
 IMG_EMBED=sglang-embed:v0.5.15-distro                  # stock lmsys + `pip install distro`
 IMG_GEMMA=sglang-gemma:v0.5.15-distro                  # stock lmsys + `pip install distro`
