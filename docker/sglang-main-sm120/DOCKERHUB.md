@@ -74,9 +74,9 @@ All values below are environment-overridable.
 | `MODEL_DIR` | `/model` | Mounted checkpoint directory |
 | `SERVED_NAME` | `deepseek-v4-flash` | OpenAI API model name |
 | `CONTEXT_LENGTH` | `1048576` | Full 1M context |
-| `MEM_FRACTION_STATIC` | `0.65` | KV pool fraction used by the qualified image |
+| `MEM_FRACTION_STATIC` | `0.85` | KV pool fraction used by the qualified image |
 | `MAX_RUNNING` | `16` | Maximum concurrent requests |
-| `CHUNKED_PREFILL_SIZE` | `8192` | Chunked-prefill token count |
+| `CHUNKED_PREFILL_SIZE` | `4096` | Chunked-prefill token count |
 | `KV_CACHE_DTYPE` | `fp8_e4m3` | KV-cache data type |
 | `PORT` | `8000` | API port |
 | `EXTRA_SERVER_ARGS` | empty | Additional `sglang.launch_server` arguments |

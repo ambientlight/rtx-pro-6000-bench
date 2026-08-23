@@ -1,33 +1,31 @@
 #!/usr/bin/env bash
 # =============================================================================
-# launch_all.sh — Bring up all inference backends on 4x RTX PRO 6000
-# (Blackwell / sm120), sharing GPUs, in the correct order.
+# launch_all.sh — Bring up LiteLLM and the enabled inference backends on
+# 4x RTX PRO 6000 (Blackwell / sm120), in the correct order.
 #
-#   :8000  DeepSeek-V4-Flash    (dsv4,   TP=4, all GPUs, mem-fraction-static 0.65)
-#   :8010  DSV4 reasoning bridge (dsv4-reasoning-bridge, CPU-only relay -> :8000)
+#   :4000  LiteLLM local proxy      (litellm-local, HTTPS, CPU-only)
+#   :8000  DeepSeek-V4-Flash    (dsv4,   TP=4, all GPUs, mem-fraction-static 0.85)
 #   :8001  Qwen3-Embedding-0.6B (qwen3-embed, GPU3 only, mem-fraction-static 0.10)
-#   :8002  Gemma-4-31B-IT-NVFP4 (gemma4, TP=4, all GPUs, mem-fraction-static 0.70)
+#   :8002  Gemma-4-31B-IT-NVFP4 (DISABLED FOR NOW; launcher retained below)
 #
 # ORDER MATTERS. In this SGLang build, --mem-fraction-static is a fraction of
 # the memory that is FREE WHEN THE PROCESS STARTS, not of total VRAM. Each
-# server must launch after the previous one has claimed its share, so launch
-# strictly: DeepSeek -> Qwen -> Gemma. Re-running out of order will mis-size
-# the KV pools and can OOM the triple-tenant card (GPU3).
+# GPU server must launch after the previous one has claimed its share, so
+# launch strictly: LiteLLM -> DeepSeek -> Qwen. LiteLLM is CPU-only; the
+# GPU-sensitive portion of that order remains DeepSeek -> Qwen. Re-running the
+# GPU backends out of order will mis-size their KV pools and can OOM GPU3.
 #
-# REBOOT SAFETY. All three containers use --restart unless-stopped, so Docker
+# REBOOT SAFETY. All three enabled containers use restart: unless-stopped, so Docker
 # brings them back after a reboot -- but Docker restarts them CONCURRENTLY in
-# arbitrary order, which would violate the ordering above. To keep reboots
-# safe, the later two containers SELF-SEQUENCE: qwen waits for :8000/health and
-# gemma waits for :8001/health (via the host gateway) before launching sglang.
-# So regardless of the order Docker starts them, each blocks until its
-# predecessor has claimed its VRAM. The wait loops are baked into the container
-# command below, so manual `./launch_all.sh` and reboot auto-start behave the
-# same way.
+# arbitrary order. LiteLLM can safely start before its backends. To preserve
+# the GPU ordering, qwen waits for :8000/health via the host gateway before
+# launching sglang. The wait loop is baked into the container command below,
+# so reboot auto-start remains safe.
 #
 # Usage:
 #   ./launch_all.sh                  # launch all (skips any already healthy)
-#   ./launch_all.sh --restart        # force-remove existing containers first
-#   ./launch_all.sh dsv4             # (dsv4|bridge|qwen|gemma) launch just one
+#   ./launch_all.sh --restart        # force-recreate existing containers
+#   ./launch_all.sh litellm          # (litellm|dsv4|qwen) launch one
 #   DSV4_MODEL_DIR=/path ./launch_all.sh dsv4   # override the DSV4 checkpoint
 # =============================================================================
 set -euo pipefail
@@ -35,16 +33,17 @@ set -euo pipefail
 # ---- shared paths ----------------------------------------------------------
 MODELS_DIR=/mnt/hot/ambientlight/models
 HF_CACHE=/mnt/hot/ambientlight/.cache/huggingface
+LITELLM_REPO=${LITELLM_REPO:-/mnt/hot/ambientlight/repos/litellm}
+LITELLM_COMPOSE_FILE=${LITELLM_COMPOSE_FILE:-${LITELLM_REPO}/docker-compose.local.yml}
 
 # DSV4 checkpoint (env-overridable): default to the 0731 weights.
 DSV4_MODEL_DIR=${DSV4_MODEL_DIR:-${MODELS_DIR}/DeepSeek-V4-Flash-0731}
 
 # ---- images ----------------------------------------------------------------
 # Benchmark-qualified SGLang main; IMG_DSV4 remains env-overridable.
-IMG_DSV4=${IMG_DSV4:-ambientlight/sglang-sm120-mxfp4:2026.08.0-cu130-sm120a}
-IMG_BRIDGE=ambientlight/dsv4-reasoning-bridge:latest   # local reasoning-bridge relay
+IMG_DSV4=${IMG_DSV4:-ambientlight/sglang-sm120-mxfp4:2026.08.0-cu130-sm120a-pr35480}
 IMG_EMBED=sglang-embed:v0.5.15-distro                  # stock lmsys + `pip install distro`
-IMG_GEMMA=sglang-gemma:v0.5.15-distro                  # stock lmsys + `pip install distro`
+# IMG_GEMMA=sglang-gemma:v0.5.15-distro                # disabled for now
 
 # ---- helper: wait until a server's /health returns 200 ---------------------
 wait_healthy() {  # $1=name  $2=port  $3=timeout_s
@@ -64,17 +63,51 @@ wait_healthy() {  # $1=name  $2=port  $3=timeout_s
 }
 
 # ---------------------------------------------------------------------------
-# 1) DeepSeek-V4-Flash  ::8000  (TP=4)
+# 1) LiteLLM local proxy  ::4000  (HTTPS, host network, CPU-only)
+#    Compose owns its config, TLS, auth-cache mounts, and runtime environment.
+#    Start it before the inference backends; routes become usable as each
+#    backend comes online.
+# ---------------------------------------------------------------------------
+launch_litellm() {
+  echo "[1/3] LiteLLM local proxy -> https://:4000"
+  if [ ! -f "$LITELLM_COMPOSE_FILE" ]; then
+    echo "  ❌ LiteLLM Compose file not found: $LITELLM_COMPOSE_FILE"
+    return 1
+  fi
+  docker compose -f "$LITELLM_COMPOSE_FILE" config --quiet
+  docker compose -f "$LITELLM_COMPOSE_FILE" up -d \
+    --no-build --force-recreate litellm
+
+  local timeout=180 i=0
+  echo "  waiting for litellm-local on https://:4000 (timeout ${timeout}s)..."
+  while [ "$i" -lt "$timeout" ]; do
+    if curl -ksf -m 3 https://localhost:4000/health/liveliness >/dev/null 2>&1; then
+      echo "  ✅ litellm-local healthy after ~${i}s"; return 0
+    fi
+    if ! docker ps --format '{{.Names}}' | grep -q '^litellm-local$'; then
+      echo "  ❌ litellm-local container exited. Last logs:"
+      docker logs --tail 25 litellm-local 2>&1 | tail -20
+      return 1
+    fi
+    sleep 5; i=$((i+5))
+  done
+  echo "  ❌ litellm-local did not become healthy in ${timeout}s"; return 1
+}
+
+# ---------------------------------------------------------------------------
+# 2) DeepSeek-V4-Flash  ::8000  (TP=4)
 #    Model-specific NCCL tuning + SM120 sparse-attn env live inside the
 #    image's entrypoint (MODEL=dsv4). We only override the mem fraction.
 # ---------------------------------------------------------------------------
 launch_dsv4() {
-  echo "[1/4] DeepSeek-V4-Flash -> :8000"
+  echo "[2/3] DeepSeek-V4-Flash -> :8000"
   docker rm -f dsv4 >/dev/null 2>&1 || true
   docker run -d --name dsv4 \
     --gpus all --ipc=host --shm-size 32g --restart unless-stopped \
     -e MODEL=dsv4 \
-    -e MEM_FRACTION_STATIC=0.65 \
+    -e MEM_FRACTION_STATIC=0.85 \
+    -e CHUNKED_PREFILL_SIZE=4096 \
+    -e SGLANG_DEFAULT_THINKING=0 \
     -e NCCL_DEBUG=WARN \
     -p 8000:8000 \
     -v "${DSV4_MODEL_DIR}:/model:ro" \
@@ -83,35 +116,10 @@ launch_dsv4() {
 }
 
 # ---------------------------------------------------------------------------
-# 1b) DSV4 reasoning bridge  ::8010  (plain-HTTP FastAPI relay, no GPU)
-#     Forces thinking, separates reasoning, re-emits DSML tool-calls as
-#     OpenAI tool_calls, repairs streaming tool-call artifacts. LiteLLM's
-#     deepseek-v4-flash route points here (:8010), which forwards to :8000.
-#     Reaches the dsv4 sglang server via the host gateway. TLS is terminated
-#     upstream at LiteLLM; this stays HTTP. Waits for dsv4 :8000 first.
-# ---------------------------------------------------------------------------
-launch_bridge() {
-  echo "[1b/4] DSV4 reasoning bridge -> :8010"
-  docker rm -f dsv4-reasoning-bridge >/dev/null 2>&1 || true
-  docker run -d --name dsv4-reasoning-bridge \
-    --add-host=host:host-gateway --restart unless-stopped \
-    -e SGLANG_BASE_URL=http://host:8000/v1 \
-    -e BRIDGE_DEBUG=1 \
-    -p 8010:8010 \
-    --entrypoint bash \
-    "$IMG_BRIDGE" \
-    -c 'echo "  [bridge] waiting for DeepSeek :8000/health before launch..."; \
-        until curl -sf -m3 http://host:8000/health >/dev/null 2>&1; do sleep 5; done; \
-        echo "  [bridge] DeepSeek healthy — launching."; \
-        exec python deepseek_reasoning_bridge.py'
-  wait_healthy dsv4-reasoning-bridge 8010 120
-}
-
-# ---------------------------------------------------------------------------
-# 2) Qwen3-Embedding-0.6B  ::8001  (TP=1, pinned to GPU3)
+# 3) Qwen3-Embedding-0.6B  ::8001  (TP=1, pinned to GPU3)
 # ---------------------------------------------------------------------------
 launch_qwen() {
-  echo "[2/4] Qwen3-Embedding-0.6B -> :8001 (GPU3)"
+  echo "[3/3] Qwen3-Embedding-0.6B -> :8001 (GPU3)"
   docker rm -f qwen3-embed >/dev/null 2>&1 || true
   docker run -d --name qwen3-embed \
     --gpus all --shm-size 4g --restart unless-stopped \
@@ -132,8 +140,12 @@ launch_qwen() {
   wait_healthy qwen3-embed 8001 300
 }
 
+# GEMMA4 DISABLED FOR NOW. This entire here-document is a block comment.
+# Remove the two GEMMA4_DISABLED lines and restore its dispatch entries to
+# re-enable it.
+: <<'GEMMA4_DISABLED'
 # ---------------------------------------------------------------------------
-# 3) Gemma-4-31B-IT-NVFP4  ::8002  (TP=4, full multimodal)  == Config B ==
+# Gemma-4-31B-IT-NVFP4  ::8002  (TP=4, full multimodal)  == Config B ==
 #    - SGLANG_ENABLE_TP_MEMORY_INBALANCE_CHECK=0 : GPU3 is co-tenant; the >10%
 #      free-mem imbalance across ranks is expected, so downgrade abort->warn.
 #    - PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True : reclaims fragmented
@@ -148,7 +160,7 @@ launch_qwen() {
 #    showed both hurt or were neutral for this dense model (Config B was best).
 # ---------------------------------------------------------------------------
 launch_gemma() {
-  echo "[3/4] Gemma-4-31B-IT-NVFP4 -> :8002 (TP=4, multimodal)"
+  echo "Gemma-4-31B-IT-NVFP4 -> :8002 (TP=4, multimodal)"
   docker rm -f gemma4 >/dev/null 2>&1 || true
   docker run -d --name gemma4 \
     --gpus all --ipc=host --shm-size 32g --restart unless-stopped \
@@ -174,42 +186,40 @@ launch_gemma() {
           --tool-call-parser gemma4 --reasoning-parser gemma4'
   wait_healthy gemma4 8002 900
 }
+GEMMA4_DISABLED
 
 # ---- dispatch --------------------------------------------------------------
 FORCE=0; TARGET=all
 for arg in "$@"; do
   case "$arg" in
     --restart) FORCE=1 ;;
-    dsv4|bridge|qwen|gemma|all) TARGET=$arg ;;
+    litellm|dsv4|qwen|all) TARGET=$arg ;;
     *) echo "unknown arg: $arg"; exit 1 ;;
   esac
 done
 
 # When launching a single target, --restart is implied (we always recreate it).
 case "$TARGET" in
+  litellm) launch_litellm ;;
   dsv4)   launch_dsv4 ;;
-  bridge) launch_bridge ;;
   qwen)   launch_qwen ;;
-  gemma)  launch_gemma ;;
   all)
     # If not forcing, skip any backend already healthy so we don't disturb it.
+    if [ "$FORCE" -eq 0 ] && curl -ksf -m3 https://localhost:4000/health/liveliness >/dev/null 2>&1; then
+      echo "[1/3] LiteLLM already healthy — skipping (use --restart to force)"
+    else launch_litellm; fi
     if [ "$FORCE" -eq 0 ] && curl -s -m3 http://localhost:8000/health >/dev/null 2>&1; then
-      echo "[1/4] DeepSeek already healthy — skipping (use --restart to force)"
+      echo "[2/3] DeepSeek already healthy — skipping (use --restart to force)"
     else launch_dsv4; fi
-    if [ "$FORCE" -eq 0 ] && curl -s -m3 http://localhost:8010/health >/dev/null 2>&1; then
-      echo "[1b/4] DSV4 bridge already healthy — skipping (use --restart to force)"
-    else launch_bridge; fi
     if [ "$FORCE" -eq 0 ] && curl -s -m3 http://localhost:8001/health >/dev/null 2>&1; then
-      echo "[2/4] Qwen already healthy — skipping (use --restart to force)"
+      echo "[3/3] Qwen already healthy — skipping (use --restart to force)"
     else launch_qwen; fi
-    if [ "$FORCE" -eq 0 ] && curl -s -m3 http://localhost:8002/health >/dev/null 2>&1; then
-      echo "[3/4] Gemma already healthy — skipping (use --restart to force)"
-    else launch_gemma; fi
+    # Gemma4 disabled for now. Restore its health check/launch branch here.
     ;;
 esac
 
 echo
-echo "=== all requested backends up ==="
-docker ps --format 'table {{.Names}}\t{{.Status}}\t{{.Ports}}' | grep -E 'NAMES|dsv4|bridge|qwen|gemma'
+echo "=== all requested services up ==="
+docker ps --format 'table {{.Names}}\t{{.Status}}\t{{.Ports}}' | grep -E 'NAMES|litellm-local|dsv4|qwen'
 echo
 nvidia-smi --query-gpu=index,memory.used,memory.free --format=csv,noheader

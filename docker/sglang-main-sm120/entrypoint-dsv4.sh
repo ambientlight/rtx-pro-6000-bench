@@ -9,8 +9,11 @@ SERVED_NAME=${SERVED_NAME:-deepseek-v4-flash}
 PORT=${PORT:-8000}
 CONTEXT_LENGTH=${CONTEXT_LENGTH:-1048576}
 MAX_RUNNING=${MAX_RUNNING:-16}
-CHUNKED_PREFILL_SIZE=${CHUNKED_PREFILL_SIZE:-8192}
-MEM_FRACTION_STATIC=${MEM_FRACTION_STATIC:-0.65}
+# Keep long Claude Code replays below the DSV4 indexer's peak scratch-memory
+# cliff. At TP=4, 8192-token chunks can require ~2.6 GiB per rank once a
+# prompt reaches ~350k tokens; 4096 keeps the same allocation near ~1.3 GiB.
+CHUNKED_PREFILL_SIZE=${CHUNKED_PREFILL_SIZE:-4096}
+MEM_FRACTION_STATIC=${MEM_FRACTION_STATIC:-0.85}
 KV_CACHE_DTYPE=${KV_CACHE_DTYPE:-fp8_e4m3}
 
 test -f "${MODEL_DIR}/config.json" || {
@@ -31,8 +34,12 @@ export NCCL_NTHREADS=${NCCL_NTHREADS:-512}
 export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0,1,2,3}
 export PYTORCH_CUDA_ALLOC_CONF=${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}
 
-# Keep the production chat semantics while taking parser behavior from main.
-export SGLANG_DEFAULT_THINKING=${SGLANG_DEFAULT_THINKING:-1}
+# Anthropic requests that explicitly enable thinking are emitted as structured
+# thinking blocks. When the field is omitted, SGLang's Anthropic adapter does
+# not activate the response parser; defaulting thinking on in that case leaks
+# the model's closing </think> marker into normal text. Keep omitted thinking
+# off, while preserving explicit Claude Code extended-thinking requests.
+export SGLANG_DEFAULT_THINKING=${SGLANG_DEFAULT_THINKING:-0}
 export SGLANG_DSV4_REASONING_EFFORT=${SGLANG_DSV4_REASONING_EFFORT:-max}
 
 echo "DSV4 main control: commit=${SGLANG_BUILD_COMMIT:-unknown} model=${MODEL_DIR} ctx=${CONTEXT_LENGTH} mrr=${MAX_RUNNING} kv=${KV_CACHE_DTYPE} port=${PORT}"
