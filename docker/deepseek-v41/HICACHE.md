@@ -1,0 +1,111 @@
+# Previous 192 GB RAM HiCache rollout — 2026-09-18 UTC
+
+Superseded by the completed [256 GB expansion](HICACHE-256.md). This document
+preserves the original 192 GB deployment evidence and its historical guards.
+
+The user requested RAM HiCache up to **192 GB total** and confirmed **one
+continuous minute idle** before relaunch. Completed successfully: container
+`2cfa1628cb23` started **02:07:23 UTC September 18**; built-in startup checks
+passed at **02:12:58 UTC** (19:12:58 PDT September 17). The one-shot service
+exited successfully. Push delivery failed; all results are saved locally.
+
+| Verified allocation / setting | Value |
+|---|---:|
+| Host-wide budget | 192,000,000,000 bytes (decimal GB) |
+| KV payload, all four ranks | 179,150,645,760 bytes |
+| Actual KV + initial free-slot arrays | 183,075,523,072 bytes |
+| Planned payload + slot allowance + reserve | 191,999,019,520 bytes |
+| Host logical FULL token capacity | 24,492,288 (not multiplied by TP4) |
+| Host SWA token slots | 190,976 per rank |
+| Device FULL / SWA token slots | 3,345,408 / 26,112 per rank |
+| Available system RAM after startup | Approximately 98 GiB |
+| Unexpected container restarts | 0 |
+
+Arithmetic, structured JSON, tool call/result and vision checks passed. All
+68 offline tests passed. Effective flags match the active profile below.
+Capture followed to `/mnt/hot/dsv41_dumps/capture-20260918T020728Z-700991`;
+zero observed packet drops and native logging refresh succeeded after startup.
+No additional inference or benchmark was sent; real workload host-hit and
+restore-correctness qualification remains to be observed.
+
+## Original 192 GB configuration
+
+Compose adds `DSV41_HICACHE_HOST_BUDGET_BYTES=192000000000` (decimal GB;
+178.81 GiB host-wide), plus two read-only SGLang host-cache source overrides.
+Boot adds hierarchical cache, `cache` host mode, `write_through`, `kernel` I/O
+and `page_first` layout. **No storage/NVMe KV backend is enabled.** Runtime is
+the unchanged v2 image **plus** these source mounts, not an image-only deploy.
+Future image builds include the sizing overlay as well.
+
+The pinned V4 path rejects generic `--hicache-size`. The scoped sizing helper
+uses actual C1/C2 shared-source KV, indexer payload/scales and packed target +
+DSpark SWA tensor shapes. It divides the budget across four local ranks,
+rounds down to whole pages, preserves the full/SWA capacity proportion, and
+includes a slot-index allowance (three copies) plus 1 GiB fixed metadata reserve.
+Actual host tensor/free-slot allocations are also checked after construction.
+KV payload is consequently smaller than 192 GB. This is a **cache allocation
+budget, not a hard process-RSS limit**; dynamic state still needs headroom.
+The watcher requires another 32 GiB available beyond the new cache before
+starting, with Engram already resident. Boot separately checks total Engram +
+HiCache + 24 GiB before loading. Unsupported layouts fail closed.
+
+Context 524288, fraction 0.87, automatic device KV, chunk 2048, interval 4,
+concurrency 8, TP4/EP4, DSPARK block 5, RAM Engram offload, diagnostics,
+`:8000`, alias `deepseek-v4-flash`, no backend key and `unless-stopped` stay
+unchanged. Model/API/kernel/scheduler implementations are not changed.
+RAM KV is lost on restart and cannot reuse genuinely different token prefixes.
+
+## Background job
+
+State/evidence: `/mnt/hot/dsv41_state/deferred-hicache-BEJbBSuX/`.
+User service: `dsv41-hicache-relaunch@deferred-hicache-BEJbBSuX.service`.
+The user-systemd manager has lingering enabled, so ending this interactive
+session does not stop the watcher. This one-shot job is not enabled on reboot.
+Changed/restarted original container, source, config or image cancels the job
+with a notification. It never automatically repeats a recorded relaunch attempt.
+
+Every five seconds it reads fresh `/v1/loads` and Prometheus HTTP metrics.
+All scheduler queues, active/pending tokens (including chunked prefill), and
+active inference HTTP streams must be zero. HTTP admission counters must stay
+unchanged between polls. New requests, stale/nonadvancing/incomplete snapshots
+or monitoring errors reset the minute. A fresh final sample precedes recreation.
+This is **not an atomic admission fence**: new requests can still race that
+last check; Docker retains the existing 90-second graceful stop period.
+
+Only `deepseek`/`dsv41` is recreated. The watcher waits for the boot-ready marker
+(not just `/health`), verifies effective flags and four-rank allocation logs,
+checks capture followed the new session, and sends push notifications for
+start/success/failure. No benchmark, KV flush or extra synthetic traffic is sent.
+Normal startup checks alone do not qualify actual RAM-cache restore correctness
+or sustained performance; observe host-hit metrics and real traffic afterward.
+
+On verification failure it saves evidence and notifies. It does **not**
+automatically stop/rollback a candidate that may already have new user requests.
+Docker's existing `unless-stopped` policy remains, so reported startup failures
+or restart loops require operator attention. `rollback.compose.json` preserves
+the previous resolved configuration.
+
+```bash
+systemctl --user status dsv41-hicache-relaunch@deferred-hicache-BEJbBSuX.service
+cat /mnt/hot/dsv41_state/deferred-hicache-BEJbBSuX/status.json
+# Cancel before state=relaunching; does not stop dsv41 itself:
+systemctl --user stop dsv41-hicache-relaunch@deferred-hicache-BEJbBSuX.service
+```
+
+## Offline validation
+
+Tests cover rounding (500 randomized cases), the real assembler on tiny CPU
+tensors with allocations mocked, shared-source/draft sizing, unsupported
+layouts, unchanged original ratio behavior, flags/mounts, idle/HTTP/stale-data
+guards, source/container changes, one-shot behavior and existing deployment,
+load-parser and diagnostics checks. Container tests use runc with no GPUs.
+After rollout, `allocation.json` records exact resolved capacities/bytes and
+`after.server-info.private.json` records effective flags. No measured cache-hit
+or performance improvement is claimed before live evidence exists.
+
+The first attempt (state directory `deferred-hicache-Fdtx3fQ8`) was rejected by
+Compose input validation before touching production: rendered zero core limits
+became an empty object. The corrected watcher restores explicit zero limits and
+validates both serialized candidate and rollback inputs before arming; an added
+regression test covers this. The push endpoint was unreachable during arming;
+notification attempts are best-effort and status remains available locally.

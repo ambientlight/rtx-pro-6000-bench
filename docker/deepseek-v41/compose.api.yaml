@@ -1,0 +1,111 @@
+# L16: binary-safe, supervised launcher logs; L15's 67/33 split is unchanged.
+# Staged 2026-09-20 UTC; one-shot rollout requires 60 continuous idle seconds.
+# 0.87 static fraction and automatic KV; bounded crash-diagnostic profile.
+name: dsv41-production
+services:
+  deepseek:
+    image: ambientlight/dsv41-sm120:cache-attribution-v1
+    container_name: dsv41
+    # Host-installed systemd slice: no swap for this container or its children.
+    # This does not impose a new physical-RAM cap; see NO-SWAP.md.
+    cgroup_parent: dsv41.slice
+    entrypoint: ["python3", "-u", "/opt/dsv41/diagnostic_entrypoint.py"]
+    command: ["run"]
+    labels:
+      dev.idle.deployment.version: dsv41-v2-log-forwarding-v1
+    gpus: all
+    ipc: host
+    # SYS_PTRACE permits the existing crash handler's py-spy scheduler dumps.
+    cap_add: [IPC_LOCK, SYS_PTRACE]
+    ulimits:
+      memlock: {soft: -1, hard: -1}
+      core: {soft: 0, hard: 0}  # CUDA dumps are separate; avoid enormous CPU cores.
+    ports:
+      # Preserve V12's host-port binding and no-backend-key access.
+      - "8000:8000"
+    volumes:
+      - /mnt/hot/ambientlight/models/DeepSeek-V4.1-Flash:/models/DeepSeek-V4.1-Flash
+      - /mnt/hot/dsv41_state/production:/state
+      # Keep legacy opaque-thinking history decryptable under the same public
+      # model alias. Signatures bind to that alias, not the weight revision.
+      - /mnt/hot/dsv4_state/anthropic-thinking.key:/run/dsv41/anthropic-thinking.key:ro
+      - /mnt/hot/dsv41_dumps:/mnt/hot/dsv41_dumps
+      - ./diagnostic_entrypoint.py:/opt/dsv41/diagnostic_entrypoint.py:ro
+      # The pinned image's boot does not forward PREFILL_DECODE_INTERVAL.
+      # Use the tested deployment launcher plus host-cache sizing only.
+      - type: bind
+        source: /mnt/hot/ambientlight/repos/sglang-dsv41-production-overlay/deployment/boot.py
+        target: /opt/dsv41/boot.py
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: /mnt/hot/ambientlight/repos/sglang-dsv41-production-overlay/python/sglang/srt/mem_cache/hybrid_cache/hybrid_pool_assembler.py
+        target: /sgl-workspace/sglang/python/sglang/srt/mem_cache/hybrid_cache/hybrid_pool_assembler.py
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: /mnt/hot/ambientlight/repos/sglang-dsv41-production-overlay/python/sglang/srt/mem_cache/hybrid_cache/dsv41_host_budget.py
+        target: /sgl-workspace/sglang/python/sglang/srt/mem_cache/hybrid_cache/dsv41_host_budget.py
+        read_only: true
+        bind:
+          create_host_path: false
+      - kernel-cache:/root/.cache
+    environment:
+      # Preload and mlock both Engram backing shards (~189.1 GiB shared host RAM).
+      OFFLOAD_MODE: "ram"
+      DSV41_CACHE_GIB: "0"  # No separate NVMe row cache in RAM mode.
+      # Decimal GB, HOST TOTAL across TP4; includes slot-index allowances.
+      # KV payload is slightly smaller. No HiCache disk/storage backend.
+      DSV41_HICACHE_HOST_BUDGET_BYTES: "256000000000"
+      # Fraction of tensor payload, not token slots or GPU memory. Metadata
+      # allowances remain inside the same 256 GB host-total budget.
+      DSV41_HICACHE_SWA_FRACTION: "0.67"  # SWA 67%; FULL KV 33%, matching L13.
+      # Prefer completed-request SWA windows over intermediate checkpoints.
+      # Soft retention only: boundaries remain evictable if capacity is needed.
+      SGLANG_OPT_HICACHE_SWA_RETAIN_REQUEST_BOUNDARIES: "1"
+      SGLANG_UNIFIED_RADIX_TREE_CORE_BACKEND: "python"
+      SERVER_PORT: "8000"
+      SERVED_MODEL_NAME: "deepseek-v4-flash"
+      REQUIRE_API_KEY: "0"
+      CONTEXT_LENGTH: "524288"  # Half the native 1,048,576-token context.
+      CHUNKED_PREFILL_SIZE: "2048"
+      PREFILL_DECODE_INTERVAL: "4"  # Decode scheduling opportunities between prefills.
+      MEMORY_FRACTION: "0.87"
+      # Keep the default allocator explicit; expandable mode failed correctness.
+      PYTORCH_ALLOC_CONF: "expandable_segments:False"
+      MAX_RUNNING_REQUESTS: "8"
+      MAX_TOTAL_TOKENS: ""  # Automatic KV sizing, matching the v1 launch profile.
+      DSV41_DIAGNOSTIC_ROOT: "/mnt/hot/dsv41_dumps/diagnostics"
+      CUDA_LOG_FILE: "stderr"
+      CUDA_ENABLE_COREDUMP_ON_EXCEPTION: "1"
+      CUDA_ENABLE_USER_TRIGGERED_COREDUMP: "1"
+      CUDA_COREDUMP_SHOW_PROGRESS: "1"
+      # Retain code/stacks/shared/local state, but omit bulk device data and
+      # the automatic host abort/core. SGLang keeps its normal error handling.
+      CUDA_COREDUMP_GENERATION_FLAGS: "skip_global_memory,skip_abort"
+      NCCL_DEBUG: "INFO"
+      NCCL_DEBUG_SUBSYS: "ALL"
+      TORCH_NCCL_TRACE_BUFFER_SIZE: "8192"
+      TORCH_NCCL_TRACE_CPP_STACK: "1"
+      TORCH_NCCL_DUMP_ON_TIMEOUT: "1"
+      # PyTorch 2.13's CUDA-exception catch has a separate opt-in dump path.
+      TORCH_NCCL_EXTRA_DUMP_ON_EXEC: "1"
+      TORCH_NCCL_ENABLE_MONITORING: "1"
+      # No extra CUDA timing events or synchronous CUDA_LAUNCH_BLOCKING.
+      TORCH_NCCL_ENABLE_TIMING: "0"
+      SGLANG_CRASH_DIAGNOSTICS_TIMEOUT_SECS: "60"
+      SGLANG_PYSPY_DUMP_TIMEOUT_SECS: "5"
+      SGLANG_PYSPY_DUMP_TOTAL_TIMEOUT_SECS: "20"
+      SGLANG_PYSPY_DUMP_NATIVE: "1"
+      SGLANG_NCCL_DUMP_BEFORE_CRASH: "1"
+      SGLANG_NCCL_DUMP_BEFORE_CRASH_WAIT_SECS: "10"
+      SGLANG_CUDA_COREDUMP_BEFORE_CRASH_WAIT_SECS: "60"
+      API_KEY: ""
+    restart: unless-stopped
+    stop_grace_period: 90s
+volumes:
+  kernel-cache:
+    external: true
+    name: dsv41-sero-baseline_kernel-cache
