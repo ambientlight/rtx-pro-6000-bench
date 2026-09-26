@@ -1,0 +1,37 @@
+# Small immutable layer for DSV4 launcher defaults. The parent retains the
+# qualified CUDA/Python/runtime stack; this layer only refreshes the entrypoint.
+ARG BASE_IMAGE=ambientlight/sglang-sm120-mxfp4:2026.08.0-cu130-sm120a-pr35480-longctx-containment-v12-code
+FROM ${BASE_IMAGE}
+
+ARG BASE_IMAGE
+ARG IMAGE_TAG=ambientlight/sglang-sm120-mxfp4:2026.08.0-cu130-sm120a-pr35480-longctx-containment-v12
+ARG BUILT_AT
+
+LABEL ai.sglang.runtime-defaults.parent="${BASE_IMAGE}" \
+      ai.sglang.runtime-defaults.built-at="${BUILT_AT}" \
+      ai.sglang.dsv4.reasoning-effort-default="high" \
+      ai.sglang.dsv4.sampling-defaults="temperature=1.0,top_p=0.95" \
+      ai.sglang.dsv4.prefill-decode-interval="4" \
+      ai.sglang.dsv4.anthropic-tool-recovery="enabled,timeout=180,max_tokens=8192,concurrency=2,ping=10" \
+      ai.sglang.dsv4.responses-tool-recovery="enabled,transactional,strict-aware,timeout=180,max_tokens=8192,concurrency=2,ping=10" \
+      ai.sglang.dsv4.responses-parser-tail="enabled,chars=8192,path=/mnt/hot/dsv4_dumps/parser-failures"
+
+COPY entrypoint-dsv4.sh /usr/local/bin/entrypoint-dsv4-main-sm120.sh
+
+RUN chmod 0755 /usr/local/bin/entrypoint-dsv4-main-sm120.sh \
+ && grep -F 'SGLANG_DSV4_REASONING_EFFORT=${SGLANG_DSV4_REASONING_EFFORT:-high}' \
+      /usr/local/bin/entrypoint-dsv4-main-sm120.sh \
+ && grep -F -- '--preferred-sampling-params "${DSV4_PREFERRED_SAMPLING_PARAMS}"' \
+      /usr/local/bin/entrypoint-dsv4-main-sm120.sh \
+ && grep -F -- '--prefill-decode-interval "${PREFILL_DECODE_INTERVAL}"' \
+      /usr/local/bin/entrypoint-dsv4-main-sm120.sh \
+ && grep -F 'SGLANG_ANTHROPIC_TOOL_RECOVERY=${SGLANG_ANTHROPIC_TOOL_RECOVERY:-1}' \
+      /usr/local/bin/entrypoint-dsv4-main-sm120.sh \
+ && grep -F 'SGLANG_ANTHROPIC_TOOL_RECOVERY_CONCURRENCY=${SGLANG_ANTHROPIC_TOOL_RECOVERY_CONCURRENCY:-2}' \
+      /usr/local/bin/entrypoint-dsv4-main-sm120.sh \
+ && grep -F 'SGLANG_RESPONSES_TOOL_RECOVERY=${SGLANG_RESPONSES_TOOL_RECOVERY:-1}' \
+      /usr/local/bin/entrypoint-dsv4-main-sm120.sh \
+ && grep -F 'SGLANG_RESPONSES_TOOL_FAILURE_DUMP_DIR=${SGLANG_RESPONSES_TOOL_FAILURE_DUMP_DIR:-/mnt/hot/dsv4_dumps/parser-failures}' \
+      /usr/local/bin/entrypoint-dsv4-main-sm120.sh
+
+ENV SGLANG_IMAGE_TAG=${IMAGE_TAG}

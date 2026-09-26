@@ -1,0 +1,116 @@
+# Production-compatible DeepSeek-V4 long-context/tool-protocol containment.
+#
+# The base image remains the benchmark-qualified SM120 runtime, including its
+# compiled CUDA/FlashInfer/DSV4 kernels and the deployed Anthropic reasoning +
+# inline-system overlay. Only the audited Python files below are replaced from
+# the exact-production source branch.
+ARG BASE_IMAGE=ambientlight/sglang-sm120-mxfp4:2026.08.0-cu130-sm120a-pr35480-inline-system-v1
+FROM ${BASE_IMAGE}
+
+ARG SOURCE_SHA
+ARG PRODUCTION_BASE_SHA=2c03d62532c880d17ef356c24275d1f7117c1d69
+ARG SOURCE_DIGEST
+ARG IMAGE_TAG
+
+LABEL org.opencontainers.image.title="sglang-dsv4-sm120-longctx-containment" \
+      org.opencontainers.image.description="Qualified DSV4 SM120 runtime with transactional Responses and Anthropic tool streaming, bounded recovery, scheduler abort propagation, and long-context containment" \
+      org.opencontainers.image.revision="${SOURCE_SHA}" \
+      ai.sglang.longctx.production-base-revision="${PRODUCTION_BASE_SHA}" \
+      ai.sglang.longctx.source-digest="${SOURCE_DIGEST}" \
+      ai.sglang.longctx.upstream-prs="33568,34459-candidate,34600,35255-candidate,35738-candidate,36154" \
+      ai.sglang.longctx.protocol-policy="consume-once-exact-order-no-empty-tool-text-sealed-omitted-thinking-explicit-tool-errors-reserved-dsml-firewall-strict-aware-schema-contract-transactional-anthropic-responses-bounded-native-tool-recovery-owned-stream-abort-bounded-parser-tail-v12"
+
+COPY python/sglang/kernels/jit/csrc/deepseek_v4/hash_topk.cuh \
+     /opt/sglang-main/python/sglang/kernels/jit/csrc/deepseek_v4/hash_topk.cuh
+COPY python/sglang/kernels/jit/csrc/moe/moe_fused_gate.cuh \
+     /opt/sglang-main/python/sglang/kernels/jit/csrc/moe/moe_fused_gate.cuh
+COPY python/sglang/kernels/ops/moe/moe_fused_gate.py \
+     /opt/sglang-main/python/sglang/kernels/ops/moe/moe_fused_gate.py
+COPY python/sglang/srt/arg_groups/overrides.py \
+     /opt/sglang-main/python/sglang/srt/arg_groups/overrides.py
+COPY python/sglang/srt/entrypoints/anthropic/protocol.py \
+     /opt/sglang-main/python/sglang/srt/entrypoints/anthropic/protocol.py
+COPY python/sglang/srt/entrypoints/anthropic/serving.py \
+     /opt/sglang-main/python/sglang/srt/entrypoints/anthropic/serving.py
+COPY python/sglang/srt/entrypoints/openai/chat_encoding.py \
+     /opt/sglang-main/python/sglang/srt/entrypoints/openai/chat_encoding.py
+COPY python/sglang/srt/entrypoints/openai/encoding_dsv4.py \
+     /opt/sglang-main/python/sglang/srt/entrypoints/openai/encoding_dsv4.py
+COPY python/sglang/srt/entrypoints/openai/protocol.py \
+     /opt/sglang-main/python/sglang/srt/entrypoints/openai/protocol.py
+COPY python/sglang/srt/entrypoints/openai/serving_chat.py \
+     /opt/sglang-main/python/sglang/srt/entrypoints/openai/serving_chat.py
+COPY python/sglang/srt/entrypoints/openai/serving_responses.py \
+     /opt/sglang-main/python/sglang/srt/entrypoints/openai/serving_responses.py
+COPY python/sglang/srt/function_call/core_types.py \
+     /opt/sglang-main/python/sglang/srt/function_call/core_types.py
+COPY python/sglang/srt/function_call/deepseekv32_detector.py \
+     /opt/sglang-main/python/sglang/srt/function_call/deepseekv32_detector.py
+COPY python/sglang/srt/function_call/function_call_parser.py \
+     /opt/sglang-main/python/sglang/srt/function_call/function_call_parser.py
+COPY python/sglang/srt/layers/moe/hash_topk.py \
+     /opt/sglang-main/python/sglang/srt/layers/moe/hash_topk.py
+COPY python/sglang/srt/managers/scheduler.py \
+     /opt/sglang-main/python/sglang/srt/managers/scheduler.py
+COPY python/sglang/srt/managers/tokenizer_manager.py \
+     /opt/sglang-main/python/sglang/srt/managers/tokenizer_manager.py
+COPY python/sglang/srt/parser/reasoning_parser.py \
+     /opt/sglang-main/python/sglang/srt/parser/reasoning_parser.py
+
+ENV SGLANG_BUILD_COMMIT=${SOURCE_SHA} \
+    SGLANG_IMAGE_TAG=${IMAGE_TAG}
+
+RUN python3 -m py_compile \
+      /opt/sglang-main/python/sglang/kernels/ops/moe/moe_fused_gate.py \
+      /opt/sglang-main/python/sglang/srt/arg_groups/overrides.py \
+      /opt/sglang-main/python/sglang/srt/entrypoints/anthropic/protocol.py \
+      /opt/sglang-main/python/sglang/srt/entrypoints/anthropic/serving.py \
+      /opt/sglang-main/python/sglang/srt/entrypoints/openai/chat_encoding.py \
+      /opt/sglang-main/python/sglang/srt/entrypoints/openai/encoding_dsv4.py \
+      /opt/sglang-main/python/sglang/srt/entrypoints/openai/protocol.py \
+      /opt/sglang-main/python/sglang/srt/entrypoints/openai/serving_chat.py \
+      /opt/sglang-main/python/sglang/srt/entrypoints/openai/serving_responses.py \
+      /opt/sglang-main/python/sglang/srt/function_call/core_types.py \
+      /opt/sglang-main/python/sglang/srt/function_call/deepseekv32_detector.py \
+      /opt/sglang-main/python/sglang/srt/function_call/function_call_parser.py \
+      /opt/sglang-main/python/sglang/srt/layers/moe/hash_topk.py \
+      /opt/sglang-main/python/sglang/srt/managers/scheduler.py \
+      /opt/sglang-main/python/sglang/srt/managers/tokenizer_manager.py \
+      /opt/sglang-main/python/sglang/srt/parser/reasoning_parser.py \
+ && python3 -c "from sglang.srt.entrypoints.openai.chat_encoding import InlineSystemStrategy, custom_encoder_inline_system_strategy; assert custom_encoder_inline_system_strategy('dsv4') is InlineSystemStrategy.LATEST_REMINDER" \
+ && python3 -c "from cryptography.hazmat.primitives.ciphers.aead import AESGCM; from sglang.srt.entrypoints.anthropic.serving import _ThinkingSignatureCodec; c=_ThinkingSignatureCodec(bytes(32)); s=c.seal('probe','dsv4'); assert c.unseal(s,'dsv4') == 'probe'; assert AESGCM" \
+ && python3 -c "from sglang.srt.entrypoints.openai.encoding_dsv4 import encode_messages; p=encode_messages([{'role':'system','content':''},{'role':'tool','content':'x','tool_call_id':'c','is_error':True}], thinking_mode='chat'); assert '<tool_result>Tool execution failed.' in p" \
+ && python3 -c "from sglang.srt.function_call.core_types import MalformedToolCallError; assert issubclass(MalformedToolCallError, ValueError)" \
+ && grep -F 'kRenormalizeSumEpsilon' \
+      /opt/sglang-main/python/sglang/kernels/jit/csrc/deepseek_v4/hash_topk.cuh \
+ && grep -F 'log1p_z = tl.where' \
+      /opt/sglang-main/python/sglang/kernels/ops/moe/moe_fused_gate.py \
+ && grep -F 'class _PendingAnthropicToolCall' \
+      /opt/sglang-main/python/sglang/srt/entrypoints/anthropic/serving.py \
+ && grep -F 'class _PendingAnthropicTextSegment' \
+      /opt/sglang-main/python/sglang/srt/entrypoints/anthropic/serving.py \
+ && grep -F '_reject_malformed_reserved_dsml_tag' \
+      /opt/sglang-main/python/sglang/srt/function_call/deepseekv32_detector.py \
+ && grep -F '_remove_partial_closing_token' \
+      /opt/sglang-main/python/sglang/srt/function_call/deepseekv32_detector.py \
+ && grep -F '_validate_anthropic_tool_input' \
+      /opt/sglang-main/python/sglang/srt/entrypoints/anthropic/serving.py \
+ && grep -F '_attempt_tool_call_recovery' \
+      /opt/sglang-main/python/sglang/srt/entrypoints/anthropic/serving.py \
+ && grep -F '_attempt_response_tool_recovery' \
+      /opt/sglang-main/python/sglang/srt/entrypoints/openai/serving_responses.py \
+ && grep -F '_write_tool_failure_dump' \
+      /opt/sglang-main/python/sglang/srt/entrypoints/openai/serving_responses.py \
+ && grep -F '_strip_dsml_protocol_padding' \
+      /opt/sglang-main/python/sglang/srt/function_call/deepseekv32_detector.py \
+ && grep -F 'strict: StrictBool = False' \
+      /opt/sglang-main/python/sglang/srt/entrypoints/anthropic/protocol.py \
+ && grep -F 'Failed to build tool-call constraint' \
+      /opt/sglang-main/python/sglang/srt/function_call/function_call_parser.py \
+ && grep -F '_release_req_states_on_failure' \
+      /opt/sglang-main/python/sglang/srt/managers/tokenizer_manager.py \
+ && grep -F 'self.abort_request(AbortReq(rid=req.rid))' \
+      /opt/sglang-main/python/sglang/srt/managers/scheduler.py \
+ && python3 -c "from sglang.srt.entrypoints.openai.protocol import Function, Tool; from sglang.srt.function_call.deepseekv4_detector import DeepSeekV4Detector; d=DeepSeekV4Detector(); t=[Tool(type='function', function=Function(name='probe', description='probe', parameters={'type':'object'}))]; x='｜DSML｜'; chunks=('\n\n', f'<{x}tool_calls>\n<{x}invoke name=\"probe\"/>', '\n', f'</{x}tool_calls>'); results=[d.parse_streaming_increment(chunk, t) for chunk in chunks]+[d.finish(t)]; assert not ''.join(result.normal_text for result in results); assert [call.name for result in results for call in result.calls if call.name] == ['probe']" \
+ && python3 -c "import pytest; from sglang.srt.entrypoints.openai.protocol import Function, Tool; from sglang.srt.function_call.core_types import MalformedToolCallError; from sglang.srt.function_call.deepseekv4_detector import DeepSeekV4Detector; x='｜DSML｜'; t=[Tool(type='function', function=Function(name='probe', parameters={'type':'object'}))]; d=DeepSeekV4Detector(); d.parse_streaming_increment(f'<{x}tool_calls>', t); pytest.raises(MalformedToolCallError, d.finish, t)" \
+ && python3 -c "from sglang.srt.entrypoints.anthropic.serving import AnthropicServing; from sglang.srt.entrypoints.openai.serving_chat import OpenAIServingChat; from sglang.srt.entrypoints.openai.serving_responses import OpenAIServingResponses; assert AnthropicServing and OpenAIServingChat and OpenAIServingResponses"

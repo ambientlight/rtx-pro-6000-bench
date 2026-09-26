@@ -40,18 +40,30 @@ RUN pip install --no-cache-dir torch==2.11.0+cu130 \
 
 # flashinfer (unified): SOURCE checkout on PYTHONPATH, not pip-installed. Its JIT
 # resolves C++/CUDA via flashinfer/data/* symlinks that a bare checkout lacks, so we
-# run build_backend._create_data_dir() to create them. Install requirements.txt (minus
-# torch), then PIN nvidia-cutlass-dsl 4.5.2 — flashinfer pulls 4.6.0, whose CuTe-DSL JIT
-# is incompatible with apache-tvm-ffi 0.1.9 (MoE compile dies at graph-capture with
-# make_kwargs_wrapper() unexpected kwarg 'map_dataclass_to_tuple'). 4.5.2 is sglang's pin.
+# run build_backend._create_data_dir() to create them. The source requirements are
+# constrained to the versions in the benchmarked 2026.07.3 image. In particular,
+# cuda-tile 1.5 pulls CUDA 13.3 packages and Cutlass DSL 4.7; those silently replace
+# torch's CUDA 13.0 runtime packages and are not the validated SM120 stack.
 RUN pip install --no-cache-dir "flashinfer-cubin==0.6.12" \
  && git clone https://github.com/ambientlight/flashinfer.git /opt/flashinfer \
  && cd /opt/flashinfer \
  && git fetch --depth 1 origin ${FLASHINFER_SHA} && git checkout ${FLASHINFER_SHA} \
  && git submodule update --init --recursive \
- && grep -ivE '^\s*torch\s*$' requirements.txt > /tmp/fi-reqs.txt \
- && pip install --no-cache-dir -r /tmp/fi-reqs.txt \
- && pip install --no-cache-dir "nvidia-cutlass-dsl[cu13]==4.5.2" \
+ && pip install --no-cache-dir \
+      "apache-tvm-ffi==0.1.9" \
+      "click==8.4.2" \
+      "cuda-tile[tileiras]==1.4.0" \
+      "einops==0.8.2" \
+      "ninja==1.13.0" \
+      "numpy==2.3.5" \
+      "nvidia-cudnn-frontend==1.25.0" \
+      "nvidia-cutlass-dsl[cu13]==4.5.2" \
+      "nvidia-ml-py==13.610.43" \
+      "packaging==26.2" \
+      "requests==2.34.2" \
+      "tabulate==0.10.0" \
+      "tqdm==4.68.4" \
+ && python -c "import importlib.metadata as m; expected={'apache-tvm-ffi':'0.1.9','cuda-tile':'1.4.0','cuda-toolkit':'13.0.2','numpy':'2.3.5','nvidia-cudnn-frontend':'1.25.0','nvidia-cutlass-dsl':'4.5.2'}; actual={k:m.version(k) for k in expected}; assert actual==expected, (actual, expected); print('validated FlashInfer dependency pins:', actual)" \
  && python -c "import build_backend; build_backend._create_data_dir(); print('flashinfer data/ symlinks created')" \
  && test -e flashinfer/data/csrc/nv_internal/tensorrt_llm/thop/fp4Quantize.cpp
 

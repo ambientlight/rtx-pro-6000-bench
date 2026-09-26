@@ -1,0 +1,39 @@
+# Narrow runtime overlay for SGLang PR #35480 on the benchmark-qualified
+# DeepSeek-V4 SM120 image. The base runtime remains pinned to b03ac355; only
+# the three production files involved in Anthropic reasoning-history replay
+# and DSV4 inline-system normalization are replaced from the audited backport
+# worktree.
+ARG BASE_IMAGE=ambientlight/sglang-sm120-mxfp4:2026.08.0-cu130-sm120a
+FROM ${BASE_IMAGE}
+
+ARG BASE_SHA=b03ac355e795b3a86b26b8732c47c0965fd71bbc
+ARG BACKPORT_SHA=2c03d62532c880d17ef356c24275d1f7117c1d69
+ARG UPSTREAM_FIX_SHA=9d473994c56f5b0dea6b88225655c4b7508c22db
+ARG INLINE_SYSTEM_SOURCE_DIGEST=unknown
+ARG IMAGE_TAG=ambientlight/sglang-sm120-mxfp4:2026.08.0-cu130-sm120a-pr35480-inline-system-v1
+
+LABEL org.opencontainers.image.title="sglang-dsv4-sm120-pr35480-backport" \
+      org.opencontainers.image.description="Benchmark-qualified b03ac355 with Anthropic reasoning-history and DSV4 inline-system backports" \
+      org.opencontainers.image.revision="${BACKPORT_SHA}" \
+      ai.sglang.base.revision="${BASE_SHA}" \
+      ai.sglang.backport.pr="https://github.com/sgl-project/sglang/pull/35480" \
+      ai.sglang.backport.upstream-commit="${UPSTREAM_FIX_SHA}" \
+      ai.sglang.anthropic.inline-system="dsv4-latest-reminder-before-user-v1" \
+      ai.sglang.anthropic.inline-system.source-digest="${INLINE_SYSTEM_SOURCE_DIGEST}"
+
+COPY python/sglang/srt/entrypoints/anthropic/serving.py \
+     /opt/sglang-main/python/sglang/srt/entrypoints/anthropic/serving.py
+COPY python/sglang/srt/entrypoints/openai/chat_encoding.py \
+     /opt/sglang-main/python/sglang/srt/entrypoints/openai/chat_encoding.py
+COPY python/sglang/srt/entrypoints/openai/serving_chat.py \
+     /opt/sglang-main/python/sglang/srt/entrypoints/openai/serving_chat.py
+
+ENV SGLANG_BUILD_COMMIT=${BACKPORT_SHA} \
+    SGLANG_IMAGE_TAG=${IMAGE_TAG}
+
+RUN python3 -c "from sglang.srt.entrypoints.openai.chat_encoding import InlineSystemStrategy, custom_encoder_inline_system_strategy, spec_owns_reasoning_history; assert spec_owns_reasoning_history('dsv4'); assert not spec_owns_reasoning_history(None); assert custom_encoder_inline_system_strategy('dsv4') is InlineSystemStrategy.LATEST_REMINDER" \
+ && python3 -c "from sglang.srt.entrypoints.openai.serving_chat import OpenAIServingChat; assert hasattr(OpenAIServingChat, 'supports_native_reasoning_history')" \
+ && python3 -m py_compile \
+      /opt/sglang-main/python/sglang/srt/entrypoints/anthropic/serving.py \
+      /opt/sglang-main/python/sglang/srt/entrypoints/openai/chat_encoding.py \
+      /opt/sglang-main/python/sglang/srt/entrypoints/openai/serving_chat.py
