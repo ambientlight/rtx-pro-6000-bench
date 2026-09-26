@@ -1,8 +1,13 @@
+# LEGACY W4A4 unified image. The current benchmark-qualified DeepSeek-V4 W4A8
+# release is ambientlight/sglang-sm120-mxfp4:2026.08.0-cu130-sm120a and is
+# defined in ../sglang-main-sm120/. Do not publish this legacy build as :latest.
+#
 # Unified SM120 image — serves BOTH DeepSeek-V4-Flash AND MiniMax-M3 (TP=4)
 # Pick the model at `docker run` via MODEL={dsv4|m3}
 # Requires NVIDIA Container Toolkit + driver >= 595
 #   docker run --rm --gpus all --ipc=host -p 8000:8000 -e MODEL=dsv4 \
-#     -v /path/DeepSeek-V4-Flash:/model:ro sm120-unified:latest
+#     -v /path/DeepSeek-V4-Flash:/model:ro \
+#     ambientlight/sglang-sm120-mxfp4:2026.07.3-cu131-sm120a
 
 ARG CUDA_BASE=nvidia/cuda:13.1.1-devel-ubuntu24.04
 FROM ${CUDA_BASE}
@@ -15,7 +20,7 @@ LABEL org.opencontainers.image.title="sglang-sm120-mxfp4" \
 ARG FLASHINFER_REF=ambientlight/sm120-mxfp4-unified
 ARG FLASHINFER_SHA=eb68b4d865a497afd5d26ce02e60c4ab5075361e
 ARG SGLANG_REF=feat/sm120-mxfp4-unified
-ARG SGLANG_SHA=241ff6d17ea71c1aa3d3fdc962126c933c1716a6
+ARG SGLANG_SHA=3e5151a1309fbe1759436a643071f2dd54d5fe28
 ARG HMMA_REF=feat/hmma-tensor-core-sparse-decode
 ARG HMMA_SHA=08bfa86aef9e7068c8ec5da3c208f4e6cea6db07
 
@@ -35,18 +40,30 @@ RUN pip install --no-cache-dir torch==2.11.0+cu130 \
 
 # flashinfer (unified): SOURCE checkout on PYTHONPATH, not pip-installed. Its JIT
 # resolves C++/CUDA via flashinfer/data/* symlinks that a bare checkout lacks, so we
-# run build_backend._create_data_dir() to create them. Install requirements.txt (minus
-# torch), then PIN nvidia-cutlass-dsl 4.5.2 — flashinfer pulls 4.6.0, whose CuTe-DSL JIT
-# is incompatible with apache-tvm-ffi 0.1.9 (MoE compile dies at graph-capture with
-# make_kwargs_wrapper() unexpected kwarg 'map_dataclass_to_tuple'). 4.5.2 is sglang's pin.
+# run build_backend._create_data_dir() to create them. The source requirements are
+# constrained to the versions in the benchmarked 2026.07.3 image. In particular,
+# cuda-tile 1.5 pulls CUDA 13.3 packages and Cutlass DSL 4.7; those silently replace
+# torch's CUDA 13.0 runtime packages and are not the validated SM120 stack.
 RUN pip install --no-cache-dir "flashinfer-cubin==0.6.12" \
  && git clone https://github.com/ambientlight/flashinfer.git /opt/flashinfer \
  && cd /opt/flashinfer \
  && git fetch --depth 1 origin ${FLASHINFER_SHA} && git checkout ${FLASHINFER_SHA} \
  && git submodule update --init --recursive \
- && grep -ivE '^\s*torch\s*$' requirements.txt > /tmp/fi-reqs.txt \
- && pip install --no-cache-dir -r /tmp/fi-reqs.txt \
- && pip install --no-cache-dir "nvidia-cutlass-dsl[cu13]==4.5.2" \
+ && pip install --no-cache-dir \
+      "apache-tvm-ffi==0.1.9" \
+      "click==8.4.2" \
+      "cuda-tile[tileiras]==1.4.0" \
+      "einops==0.8.2" \
+      "ninja==1.13.0" \
+      "numpy==2.3.5" \
+      "nvidia-cudnn-frontend==1.25.0" \
+      "nvidia-cutlass-dsl[cu13]==4.5.2" \
+      "nvidia-ml-py==13.610.43" \
+      "packaging==26.2" \
+      "requests==2.34.2" \
+      "tabulate==0.10.0" \
+      "tqdm==4.68.4" \
+ && python -c "import importlib.metadata as m; expected={'apache-tvm-ffi':'0.1.9','cuda-tile':'1.4.0','cuda-toolkit':'13.0.2','numpy':'2.3.5','nvidia-cudnn-frontend':'1.25.0','nvidia-cutlass-dsl':'4.5.2'}; actual={k:m.version(k) for k in expected}; assert actual==expected, (actual, expected); print('validated FlashInfer dependency pins:', actual)" \
  && python -c "import build_backend; build_backend._create_data_dir(); print('flashinfer data/ symlinks created')" \
  && test -e flashinfer/data/csrc/nv_internal/tensorrt_llm/thop/fp4Quantize.cpp
 

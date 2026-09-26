@@ -315,15 +315,19 @@ the agent needs to escape failed-approach loops (a single trajectory hit 250 tur
 > Throughput is measured (see [Performance](#performance)); agentic-eval is **SWE-bench Verified 374/500 =
 > 74.8%** (see [Agentic eval](#agentic-eval--swe-bench-verified)).
 
+These are historical validation results. The local `spikes/` probes used for
+these checks were archived during repository cleanup and are not distributed
+with this repository.
+
 | Check | Result |
 |---|---|
-| MoE numerical parity (`spikes/m3_mxfp4_real.py`, real weights, dual-golden) | swigluoai **cos 0.984** vs BF16 golden; `[w3,w1]` swap pinned (swap-off 0.891); clamp bit-identical in fp32 |
-| MXFP8 linear (`spikes/m3_mxfp8_real.py`, `m3_mxfp8_tp.py`) | `dot_scaled` vs BF16 **cos 0.9996**, correct under TP=4 col+row sharding |
+| MoE numerical parity (historical probe, real weights, dual-golden) | swigluoai **cos 0.984** vs BF16 golden; `[w3,w1]` swap pinned (swap-off 0.891); clamp bit-identical in fp32 |
+| MXFP8 linear (historical standalone and TP probes) | `dot_scaled` vs BF16 **cos 0.9996**, correct under TP=4 col+row sharding |
 | Sparse attention (in-server dumps) | prefill + decode `o` vs dense softmax **cos 1.00000** on all 4 ranks |
 | Full-server correctness (eager + cuda-graph) | "capital of Japan?"→**Tokyo**; "17+25"→**42**; greedy **deterministic** |
-| Quality (`spikes/m3_gsm8k_live.py`, GSM8K temp=0) | **40/41 = 97.6%**, 0 truncations |
+| Quality (historical GSM8K probe, temp=0) | **40/41 = 97.6%**, 0 truncations |
 | Agentic eval (mini-swe-agent v2.4.2, SWE-bench Verified) | **374/500 = 74.8%** (temp 1.0, native tool-calling; ±2 across re-scores) |
-| Load-completeness guard (`spikes/m3_load_guard_sim.py`) | fires on the original `weight_packed` silent-skip; silent on the fix |
+| Load-completeness guard (historical simulation) | fires on the original `weight_packed` silent-skip; silent on the fix |
 
 ---
 

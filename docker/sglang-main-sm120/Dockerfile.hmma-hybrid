@@ -1,0 +1,40 @@
+# Latest-main DSV4 control with only the tuned SM120 sparse-attention kernel
+# replayed. The native FlashInfer MXFP4 MoE remains unchanged.
+ARG MAIN_IMAGE=ambientlight/sglang-main-sm120:b03ac355-cu130-candidate
+ARG CUSTOM_IMAGE=ambientlight/sglang-sm120-mxfp4:latest
+
+FROM ${CUSTOM_IMAGE} AS hmma_source
+
+FROM ${MAIN_IMAGE}
+
+ARG SGLANG_SHA=b03ac355e795b3a86b26b8732c47c0965fd71bbc
+ARG HMMA_SHA=08bfa86aef9e7068c8ec5da3c208f4e6cea6db07
+
+LABEL org.opencontainers.image.title="sglang-main-dsv4-sm120-hmma-hybrid" \
+      org.opencontainers.image.description="Pinned SGLang main with native SM120 MXFP4 MoE and replayed HMMA sparse attention" \
+      org.opencontainers.image.revision="${SGLANG_SHA}" \
+      ai.sglang.comparison.role="main-hmma-attention-hybrid" \
+      ai.sglang.hmma.revision="${HMMA_SHA}" \
+      ai.sglang.native-main-moe="flashinfer_mxfp4"
+
+# Rebuild the custom extension against this image's Torch 2.13 / CUDA 13.0 ABI.
+# The source-stage binary was compiled against Torch 2.11 and is deliberately
+# discarded rather than copied into the candidate runtime.
+COPY --from=hmma_source /opt/hmma /opt/hmma
+RUN rm -rf /opt/hmma/build /opt/hmma/deepseek_v4_kernel/*.so /opt/hmma/*.egg-info \
+ && cd /opt/hmma \
+ && test "$(git rev-parse HEAD)" = "${HMMA_SHA}" \
+ && MAX_JOBS=4 NVCC_THREADS=4 \
+      python3 -m pip install --no-cache-dir --no-deps --no-build-isolation -e .
+
+# The build context is the clean latest-main worktree with the narrow dispatch
+# patch applied. No custom MoE or quantization source is copied into the image.
+COPY python/sglang/kernels/ops/attention/flash_mla_sm120.py \
+     /opt/sglang-main/python/sglang/kernels/ops/attention/flash_mla_sm120.py
+
+ENV SGLANG_SM120_FLASHMLA_BACKEND=hmma \
+    SGLANG_IMAGE_TAG=ambientlight/sglang-main-sm120:b03ac355-cu130-hmma-hybrid
+
+RUN python3 -c "import torch; from deepseek_v4_kernel.ops import sparse_decode_fwd; assert torch.__version__ == '2.13.0+cu130', torch.__version__; print('HMMA rebuilt for', torch.__version__)" \
+ && python3 -c "from sglang.kernels.ops.attention.flash_mla_sm120 import _sm120_default_backend; assert _sm120_default_backend == 'hmma', _sm120_default_backend; print('SM120 attention backend:', _sm120_default_backend)" \
+ && python3 -c "from sglang.srt.layers.quantization.mxfp4_flashinfer_cutlass_moe import Mxfp4FlashinferCutlassMoEMethod; print('native main FlashInfer MXFP4 MoE import OK')"

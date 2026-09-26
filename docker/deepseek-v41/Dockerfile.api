@@ -1,0 +1,62 @@
+# Build context: the separate sglang-dsv41-production-overlay worktree.
+# The build helper verifies this tag's immutable ID before invoking Docker.
+FROM ambientlight/dsv41-sm120:sero-45f538a-baseline
+ARG OVERLAY_REVISION
+LABEL org.opencontainers.image.title="DeepSeek V4.1 pinned Sero runtime with V12 API containment" \
+      dev.idle.sero.revision="45f538a18569420721e00e37353f9a7e1af7e5da" \
+      dev.idle.baseline.image="sha256:e930a2bd721c583d9aae78fd28f0cbb90141a09213fa2169a1afed0d075fd691" \
+      dev.idle.overlay.revision="${OVERLAY_REVISION}" \
+      dev.idle.v12.donor="71c498b991ce143999132aafd951d16d6b119805"
+
+# Deliberately no dependency install or kernel, scheduler or Engram replacement.
+# Keep the hardware-qualified stack intact.
+# Tokenizer-manager/watchdog changes below are scoped to fatal diagnostics.
+COPY python/sglang/srt/entrypoints/anthropic/protocol.py \
+     python/sglang/srt/entrypoints/anthropic/serving.py \
+     /sgl-workspace/sglang/python/sglang/srt/entrypoints/anthropic/
+COPY python/sglang/srt/entrypoints/openai/chat_encoding.py \
+     python/sglang/srt/entrypoints/openai/encoding_dsv4.py \
+     python/sglang/srt/entrypoints/openai/encoding_dsv41.py \
+     python/sglang/srt/entrypoints/openai/protocol.py \
+     python/sglang/srt/entrypoints/openai/serving_chat.py \
+     python/sglang/srt/entrypoints/openai/serving_responses.py \
+     /sgl-workspace/sglang/python/sglang/srt/entrypoints/openai/
+COPY python/sglang/srt/function_call/core_types.py \
+     python/sglang/srt/function_call/deepseekv32_detector.py \
+     python/sglang/srt/function_call/deepseekv41_detector.py \
+     python/sglang/srt/function_call/function_call_parser.py \
+     /sgl-workspace/sglang/python/sglang/srt/function_call/
+COPY python/sglang/srt/parser/reasoning_parser.py \
+     /sgl-workspace/sglang/python/sglang/srt/parser/reasoning_parser.py
+COPY deployment/boot.py /opt/dsv41/boot.py
+COPY python/sglang/srt/mem_cache/hybrid_cache/hybrid_pool_assembler.py \
+     python/sglang/srt/mem_cache/hybrid_cache/dsv41_host_budget.py \
+     /sgl-workspace/sglang/python/sglang/srt/mem_cache/hybrid_cache/
+# Cache-retention support is opt-in at deployment level. Keep the release
+# build's explicit source manifest in sync with these runtime files.
+COPY python/sglang/srt/environ.py /sgl-workspace/sglang/python/sglang/srt/environ.py
+COPY python/sglang/srt/managers/tokenizer_manager.py /sgl-workspace/sglang/python/sglang/srt/managers/tokenizer_manager.py
+COPY python/sglang/srt/utils/watchdog.py /sgl-workspace/sglang/python/sglang/srt/utils/watchdog.py
+COPY python/sglang/srt/utils/cudacore_pyspy_dump_utils.py /sgl-workspace/sglang/python/sglang/srt/utils/cudacore_pyspy_dump_utils.py
+COPY python/sglang/srt/managers/scheduler_components/metrics_reporter.py /sgl-workspace/sglang/python/sglang/srt/managers/scheduler_components/metrics_reporter.py
+COPY python/sglang/srt/mem_cache/unified_cache/components/swa_component.py /sgl-workspace/sglang/python/sglang/srt/mem_cache/unified_cache/components/swa_component.py
+COPY python/sglang/srt/mem_cache/unified_cache/unified_tree_core.py /sgl-workspace/sglang/python/sglang/srt/mem_cache/unified_cache/unified_tree_core.py
+COPY python/sglang/srt/mem_cache/unified_cache/host_cache_diagnostics.py /sgl-workspace/sglang/python/sglang/srt/mem_cache/unified_cache/host_cache_diagnostics.py
+COPY python/sglang/srt/observability/metrics_collector.py /sgl-workspace/sglang/python/sglang/srt/observability/metrics_collector.py
+
+ENV TORCH_NCCL_EXTRA_DUMP_ON_EXEC=1 \
+    SGLANG_DEFAULT_THINKING=0 \
+    SGLANG_DSV41_REASONING_EFFORT=high \
+    SGLANG_ANTHROPIC_THINKING_KEY_FILE=/run/dsv41/anthropic-thinking.key \
+    SGLANG_ANTHROPIC_TOOL_RECOVERY=1 \
+    SGLANG_ANTHROPIC_TOOL_RECOVERY_TIMEOUT_S=180 \
+    SGLANG_ANTHROPIC_TOOL_RECOVERY_MAX_TOKENS=8192 \
+    SGLANG_ANTHROPIC_TOOL_RECOVERY_CONCURRENCY=2 \
+    SGLANG_ANTHROPIC_TOOL_RECOVERY_PING_INTERVAL_S=10 \
+    SGLANG_RESPONSES_TOOL_RECOVERY=1 \
+    SGLANG_RESPONSES_TOOL_RECOVERY_TIMEOUT_S=180 \
+    SGLANG_RESPONSES_TOOL_RECOVERY_MAX_TOKENS=8192 \
+    SGLANG_RESPONSES_TOOL_RECOVERY_CONCURRENCY=2 \
+    SGLANG_RESPONSES_TOOL_RECOVERY_PING_INTERVAL_S=10 \
+    SGLANG_RESPONSES_TOOL_FAILURE_DUMP_DIR=/mnt/hot/dsv41_dumps/parser-failures \
+    SGLANG_RESPONSES_TOOL_FAILURE_TAIL_CHARS=8192

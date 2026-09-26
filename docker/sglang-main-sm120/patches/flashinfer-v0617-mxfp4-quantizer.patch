@@ -1,0 +1,51 @@
+diff --git a/flashinfer/cute_dsl/fp4_common.py b/flashinfer/cute_dsl/fp4_common.py
+index c7954b2a..f5f4ab76 100644
+--- a/flashinfer/cute_dsl/fp4_common.py
++++ b/flashinfer/cute_dsl/fp4_common.py
+@@ -2739,3 +2739,46 @@ def relu2_quantize_block_fp4(
+     activated = relu2_16(x)
+     block_max = max_abs_16(activated)
+     return quantize_block_fp4(activated, block_max, global_scale_val)
++
++
++# MXFP4 activation quantizer used by the SM120 W4A4 fused-MoE replay.
++# MXFP4 uses 32-element blocks and an E8M0 power-of-two block scale.
++@cute.jit
++def quantize_and_pack_32(
++    y_f32: cute.Tensor, inv_scale: Float32
++) -> Tuple[Uint64, Uint64]:
++    """Quantize 32 float32 values to FP4 and pack them into two uint64s."""
++    q = cute.make_rmem_tensor((32,), Float32)
++    for i in cutlass.range_constexpr(32):
++        q[i] = y_f32[i] * inv_scale
++
++    lo_a = cvt_e2m1x8_f32(q[0], q[1], q[2], q[3], q[4], q[5], q[6], q[7])
++    lo_b = cvt_e2m1x8_f32(
++        q[8], q[9], q[10], q[11], q[12], q[13], q[14], q[15]
++    )
++    hi_a = cvt_e2m1x8_f32(
++        q[16], q[17], q[18], q[19], q[20], q[21], q[22], q[23]
++    )
++    hi_b = cvt_e2m1x8_f32(
++        q[24], q[25], q[26], q[27], q[28], q[29], q[30], q[31]
++    )
++    packed_lo = (Uint64(lo_b) << Uint64(32)) | Uint64(lo_a)
++    packed_hi = (Uint64(hi_b) << Uint64(32)) | Uint64(hi_a)
++    return packed_lo, packed_hi
++
++
++@cute.jit
++def quantize_block_mxf4(
++    values: cute.Tensor,
++    max_abs: Float32,
++) -> Tuple[Uint64, Uint64, Uint8]:
++    """Quantize a 32-value block to packed FP4 plus its E8M0 scale byte."""
++    packed_lo = Uint64(0)
++    packed_hi = Uint64(0)
++    scale_byte = Uint8(0)
++    if max_abs > Float32(0.0):
++        ue8m0 = cvt_f32_to_ue8m0(max_abs / Float32(FLOAT4_E2M1_MAX))
++        scale_byte = Uint8(ue8m0 & Uint32(0xFF))
++        inv_scale = ue8m0_to_output_scale(ue8m0)
++        packed_lo, packed_hi = quantize_and_pack_32(values, inv_scale)
++    return packed_lo, packed_hi, scale_byte
