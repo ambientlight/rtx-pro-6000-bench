@@ -1,5 +1,7 @@
 # V4.1 integration: pinned SM120 baseline
 
+Benchmark reports: [long-context TPS, prefill and cache experiments](../../bench/deepseek-v4.1-flash_TP4_sglang/README.md).
+
 ## Current: preserved L16 runtime with persistent no-swap policy
 
 As of September 25, the live container is `9137db3cfdc7`, started at
@@ -167,14 +169,14 @@ The preceding **0.85** restored-v1 profile was initially verified
 with built-in startup smokes and read-only configuration/health/capture checks.
 Startup passed at **07:30:56 UTC September 16**; the endpoint is healthy with zero
 restarts and an automatically sized **2259712-token KV pool**. Capture is active.
-The user subsequently requested a [full-window prefill](BENCHMARK-FULL-PREFILL-RESTORED-085-2026-09-16.md):
+The user subsequently requested a [full-window prefill](../../bench/deepseek-v4.1-flash_TP4_sglang/BENCHMARK-FULL-PREFILL-RESTORED-085-2026-09-16.md):
 524177 uncached input tokens passed at **09:12 UTC**, with the correct answer,
 100.39 s server prefill (~5221 tokens/s), 272 recoverable allocation-retry warning
 lines, and no fatal/API error or restart. No serving settings changed for the test.
 See `STATUS.md` for identity, validation scope and evidence.
 
 The previous 0.90 / 1107712-capped profile passed startup, 14 API requests and
-the [exact 524177-token replay](BENCHMARK-FULL-PREFILL-V2-NONEXPANDABLE-2026-09-16.md),
+the [exact 524177-token replay](../../bench/deepseek-v4.1-flash_TP4_sglang/BENCHMARK-FULL-PREFILL-V2-NONEXPANDABLE-2026-09-16.md),
 with 208 recoverable allocator retries. That benchmark is historical evidence,
 not a test of the newly restored profile. Both expandable-segments variants
 failed startup tool correctness; see
@@ -216,11 +218,11 @@ historical exact capacity. Both expandable-segments variants failed startup
 correctness and are not qualified for serving.
 This supersedes the unsuccessful 0.83 attempt; context is unchanged.
 The initial rollout excluded throughput and long-prefill tests, as then requested.
-The subsequently requested [524k prefill](BENCHMARK-FULL-PREFILL-V2-090-2026-09-16.md)
+The subsequently requested [524k prefill](../../bench/deepseek-v4.1-flash_TP4_sglang/BENCHMARK-FULL-PREFILL-V2-090-2026-09-16.md)
 failed with a fatal GPU 1 OOM during attention-indexer score padding, while
 Starfield was active. Docker automatically restarted the unchanged container.
 Startup/API health does not qualify this shared-GPU profile for full-window use.
-After the user stopped Starfield, the [exact 524177-token replay](BENCHMARK-FULL-PREFILL-V2-NO-GAME-2026-09-16.md)
+After the user stopped Starfield, the [exact 524177-token replay](../../bench/deepseek-v4.1-flash_TP4_sglang/BENCHMARK-FULL-PREFILL-V2-NO-GAME-2026-09-16.md)
 passed in 100.22 s server prefill (~5230 tokens/s), with 210 recoverable allocator
 retry lines and no fatal/API error or new restart. No serving restart or setting
 change was made for that repeat; the existing 1107712-slot KV pool was preserved.

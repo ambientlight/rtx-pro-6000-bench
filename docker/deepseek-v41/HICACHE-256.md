@@ -78,7 +78,7 @@ Sustained concurrent stability and RAM-restore correctness remain unqualified.
 
 ### Subsequent 64 × 256k cache-pressure experiment
 
-The [completed long-prefill experiment](CACHE-PRESSURE-64X256K-2026-09-18.md)
+The [completed long-prefill experiment](../../bench/deepseek-v4.1-flash_TP4_sglang/CACHE-PRESSURE-64X256K-2026-09-18.md)
 ran 03:16–04:13 UTC: all 64 cold calls and eight exact replays returned correct
 answers without a restart. Seven older replays missed; the recent replay reused
 255,744 tokens in 1.285 seconds via SWA-only restoration, with FULL KV still on

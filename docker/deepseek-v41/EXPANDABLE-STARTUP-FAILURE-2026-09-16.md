@@ -110,7 +110,7 @@ acceptance requests before it and seven afterward. No restart or fatal/API error
 occurred. There were **208 recoverable allocator-retry warning lines** during
 the full prefill; disabling expandable segments restores correctness here, not
 memory-pressure-free operation. See the
-[retest report](BENCHMARK-FULL-PREFILL-V2-NONEXPANDABLE-2026-09-16.md).
+[retest report](../../bench/deepseek-v4.1-flash_TP4_sglang/BENCHMARK-FULL-PREFILL-V2-NONEXPANDABLE-2026-09-16.md).
 
 This controlled configuration comparison strongly implicates an allocator-mode
 interaction in the pinned runtime. It does not establish its internal mechanism

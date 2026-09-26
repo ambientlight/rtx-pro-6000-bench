@@ -1,6 +1,92 @@
 # rtx-pro-6000-bench
 
-Benchmark sweep harness for local model inference (SM120). Sweeps concurrency levels, input/output token lengths, and collects GPU telemetry (power, KV cache, utilization) to produce comparison charts.
+Benchmark sweep harness for local model inference on SM120.
+
+## DeepSeek-V4-Flash-0731 vs DeepSeek-V4.1-Flash
+
+My real traffic (non-bench) across v4-flash and v4.1-flash for codex, claude code and agent evals.
+
+My practical use of v4-flash started with 0731 release as original(preview) 0424 wasn't as usable day-to-day for my main session (non-subagent) coding workflows. 0424 had common occurances of reasoning (at max) degenerating after 300-400k context mark, a fraction of invalid tool call could be recovered with mechanical fixes, but reasoning repetition and mandarin on long context effectively constrained the usable context below 300k.
+
+Sglang deployment for dsv4-flash-0731 also took a series of fixes to decrease error rates on tool calls and stabilize the caching for OAI's `/v1/responses` and Anthropics `/v1/messages` which broke caching at times as claude code updates started to use new features available in `/v1/messages` (like mid-coversation system messages), ref [fix/dsv4-longctx-production-overlay](https://github.com/sgl-project/sglang/compare/main...ambientlight:sglang:fix/dsv4-longctx-production-overlay), while the sglang deployment was changed from my custom W4A4 stack to upstream SGLang of
+[b03ac355](https://github.com/sgl-project/sglang/commit/b03ac355e795b3a86b26b8732c47c0965fd71bbc)
+with W4A8 MoE that beat the previous custom W4A4 stack in all matched benchmarks.
+
+Upgrade to dsv4.1-flash saw substantail performance gains in prefill and decode but needed caching fixes, 256GB RAM L2 HiCache enabled to exceeed previous dsv4-flash-0731 96% avarage. Mean per-request decode went **48.8 → 97.9 tok/s**. Building on
+[0xSero's SM120 recipe](https://github.com/0xSero/deepseek-v4.1-flash-4x-rtx-pro-6000),
+we added [SWA-boundary retention](docker/deepseek-v41/SWA-RETENTION-2026-09-18.md)
+and tuned **256 GB RAM HiCache to 67% SWA / 33% FULL KV by bytes**. That RAM
+cache contributed additional **3.62%**, bringing combined L1 + L2 coverage to **97.82%**. The
+[Level1Techs post](https://forum.level1techs.com/p/4119105) provides the original
+comparison's; the V4.1 numbers below are updated to latest launch (L16):
+
+| Metric | DSV4-FLASH-0731 | DSV4.1-FLASH |
+|---|---:|---:|
+| **Duration** |  |  |
+| Reporting period (UTC) | Aug 24 – Sep 15, 2026 | Sep 20–25, 2026 (L16) |
+| Wall-clock observation span | 531.70 h | 111.11 h |
+| Sum of request-activity windows | 511.73 h | 111.03 h |
+| Completed non-health generations | 256,325 | 70,477 |
+| Health-check generations | 6,303 | 4,700 |
+| POST /v1/messages | 175,668 | 62,615 |
+| POST /v1/chat/completions | 62,436 | 7,100 |
+| POST /v1/responses | 18,662 | 869 |
+| POST /v1/messages/count_tokens | 2,356 | 685 |
+| **Prompt size, tokens** |  |  |
+| Average full prompt | 111,499 | 123,933 |
+| Median prompt | 102,047 | 118,872 |
+| p95 prompt | 264,293 | 249,896 |
+| Largest prompt | 473,107 | 272,426 |
+| Average cached prompt tokens | 107,688 | 121,229 |
+| Average uncached prompt tokens | 3,811 | 2,704 |
+| **Latency, seconds — p50 / p95 / p99** |  |  |
+| Queue / admission | 0.64 / 2.08 / 27.14 | 0.92 / 3.06 / 16.75 |
+| TTFT, engine-side | 1.21 / 7.09 / 42.00 | 1.31 / 6.31 / 23.29 |
+| Prefill | 0.27 / 2.27 / 18.09 | 0.24 / 1.67 / 8.51 |
+| Decode | 5.04 / 49.89 / 152.32 | 3.64 / 31.49 / 83.17 |
+| E2E, engine-side | 6.47 / 58.60 / 161.35 | 5.34 / 36.28 / 87.64 |
+| **Throughput, average** |  |  |
+| Per-request decode, tok/s | 48.8 | 97.9 |
+| Batch generation, tok/s | 137.4 | 216.9 |
+| Prefill input, tok/s | 2,444 | 2,552 |
+| DSPARK(5) acceptance length / rate | N/A — not enabled | 3.74 / 0.548 |
+| **Tokens** |  |  |
+| Input tokens | 28,579,867,197 | 8,734,391,441 |
+| Output tokens | 148,540,907 | 53,386,522 |
+| Of which reported reasoning | 87,042,866 | 33,351,924 |
+| Average output per generation | 580 | 758 |
+| **Cache & health** |  |  |
+| Token-weighted cache hit | 96.58% | 97.82% |
+| Input served from RAM L2 | 0% — disabled | 3.62% · 315,928,576 tokens |
+| Zero-hit generations | 11,578 (4.52%) | 3,003 (4.26%) |
+| HTTP 200 / 503 / 400, all routes | 303,043 / 40 / 37 | 117,009 / 4 / 23 |
+| Other HTTP statuses | 404: 54, 500: 10 | 0 |
+| HTTP 2xx rate, all routes | 99.953% | 99.977% |
+| HTTP 2xx rate, inference routes only | 99.982% | 99.967% |
+| Allocator OOM-warning log lines | 0 | 113 |
+
+Generation, token and prompt rows use logged non-health completions; HTTP rows
+have a separate counting scope. See [L16 sources, counter reconciliation and run
+outcome](bench/deepseek-v4.1-flash_TP4_sglang/L16-REAL-TRAFFIC-2026-09-25.md#comparison-population),
+[deployment configuration](docker/deepseek-v41/compose.api.yaml) and
+[benchmark reports](bench/deepseek-v4.1-flash_TP4_sglang/README.md).
+
+## DeepSeek-V4-Flash-0731: SGLang-main comparison
+
+**2026-08-20 · TP4 · 300 W/GPU.** Pinned SGLang
+[b03ac355](https://github.com/sgl-project/sglang/commit/b03ac355e795b3a86b26b8732c47c0965fd71bbc)
+with native W4A8 MoE
+beat the previous custom W4A4 stack in all nine matched benchmark cells (8K/64K
+input, 1K output), improving output throughput and lowering TTFT, TPOT and
+end-to-end latency.
+
+| Single-stream output throughput | Previous custom stack | SGLang main [b03ac355](https://github.com/sgl-project/sglang/commit/b03ac355e795b3a86b26b8732c47c0965fd71bbc) |
+|---|---:|---:|
+| 8K input / 1K output | 46.94 tok/s | 82.65 tok/s |
+| 64K input / 1K output | 18.38 tok/s | 47.19 tok/s |
+
+See the [benchmark report](bench/deepseek-v4-sm120-main-compare-20260820/REPORT.md)
+and [Docker image (`2026.08.0-cu130-sm120a`)](https://hub.docker.com/r/ambientlight/sglang-sm120-mxfp4?tag=2026.08.0-cu130-sm120a).
 
 ## Hardware
 
@@ -11,7 +97,9 @@ Benchmark sweep harness for local model inference (SM120). Sweeps concurrency le
 - **PSU**: Super Flower Leadex Titanium 1700W ATX 3.1
 - **OS**: Ubuntu 24.04 LTS
 
-## Models Benchmarked
+-----
+
+# Models Benchmarked (OLD)
 
 | Model | Released | Architecture | Params (total / active) | Context | Engine | Weights | Quantization | Config | Tput 2K·c64 (tok/s) | Tput 64K·c16 (tok/s) | SWE-bench Verified (mini-swe-agent v2.4.2) | 1M decode (tok/s, c1)¹ | 1M prefill TTFT (c1)¹ | Notes |
 |-------|----------|-------------|------------------------|---------|--------|---------|--------------|--------|:------------------:|:-------------------:|:------------------:|:---------------------:|:---------------------:|-------|
@@ -164,6 +252,11 @@ bench-sweep --dry-run --model-id qwen35-397b-a17b-nvfp4 \
 
 ## Directory Structure
 
+Raw results use the model/power/TP/engine layout below, with named subdirectories
+for comparison variants. See the [V4-0731 results](bench/deepseek-v4-flash-0731_W300_TP4_sglang/README.md)
+and [V4.1 benchmark reports](bench/deepseek-v4.1-flash_TP4_sglang/README.md).
+Report collections without a consistently recorded power limit omit `W{watt}`.
+
 ```
 bench/
   {model}_W{watt}_TP{tp}_{engine}/
@@ -267,9 +360,3 @@ PYTORCH_ALLOC_CONF=expandable_segments:True vllm serve /path/to/model --config /
 | `b.log` | Single-line `bench-sweep` invocation command with all CLI args |
 | `bench_sweep.log` | Full concatenated stdout from all benchmark runs (config dumps, progress, result tables) |
 | `sweep-single.log` / `bench_sweep_single.*.log` | Single-sequence (c1) long-context sweep logs — the 32K→1M runs behind the "Long-context scaling to 1M" table (M3: `sweep-single.log`) |
-
----
-
-# Disclaimer
-
-This repo was mostly AI-generated using [cc](https://claude.com/claude-code) with opus-4.6 and later opus-4.8 (max).

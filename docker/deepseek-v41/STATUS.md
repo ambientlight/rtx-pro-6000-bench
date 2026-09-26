@@ -371,7 +371,7 @@ Private preservation, drain and verification evidence:
 ### Subsequently requested full-window prefill — passed at 09:12 UTC
 
 The user then requested another full half-native-context prefill. The
-[exact saved 524177-token request](BENCHMARK-FULL-PREFILL-RESTORED-085-2026-09-16.md)
+[exact saved 524177-token request](../../bench/deepseek-v4.1-flash_TP4_sglang/BENCHMARK-FULL-PREFILL-RESTORED-085-2026-09-16.md)
 was replayed once at **09:10:38 UTC**, after 20 continuous idle seconds. The
 container, image, settings and cache pool were unchanged; no restart or cache
 flush was performed. Starfield was absent and no other non-health inference
@@ -406,7 +406,7 @@ All **14 live API requests** (seven before and seven after the full prefill)
 passed Responses/Messages tool streaming and continuation, thinking replay,
 and vision checks.
 
-The [exact full-window replay](BENCHMARK-FULL-PREFILL-V2-NONEXPANDABLE-2026-09-16.md)
+The [exact full-window replay](../../bench/deepseek-v4.1-flash_TP4_sglang/BENCHMARK-FULL-PREFILL-V2-NONEXPANDABLE-2026-09-16.md)
 completed at **07:10:27 UTC**: **524177 uncached input tokens**, correct `42`
 (two output tokens), **100.2432 s server prefill / 5229.05 tokens/s**, and
 **103.5697 s client wall time**. There were **208 recoverable allocator-retry
@@ -460,7 +460,7 @@ and prior-config rollback: `/mnt/hot/dsv41_state/expandable-090-YXkuqtGz/`.
 
 ## Previous successful state: v2 / 0.90 without expandable segments
 
-After the user stopped Starfield, the [exact full-window replay](BENCHMARK-FULL-PREFILL-V2-NO-GAME-2026-09-16.md)
+After the user stopped Starfield, the [exact full-window replay](../../bench/deepseek-v4.1-flash_TP4_sglang/BENCHMARK-FULL-PREFILL-V2-NO-GAME-2026-09-16.md)
 **passed at 06:24:05 UTC**: **524177 uncached input tokens**, correct `42` answer,
 **100.2216 s server prefill / 5230.18 tokens/s**, and **103.8062 s client wall time**.
 There were **210 recoverable allocation-retry warning lines**, but no fatal/API
@@ -478,7 +478,7 @@ test. The earlier RAM-residency limitation is unchanged.
 
 ### Previous full-window attempt with Starfield running
 
-The subsequently requested [full-window prefill](BENCHMARK-FULL-PREFILL-V2-090-2026-09-16.md)
+The subsequently requested [full-window prefill](../../bench/deepseek-v4.1-flash_TP4_sglang/BENCHMARK-FULL-PREFILL-V2-090-2026-09-16.md)
 **failed at 06:06:08 UTC**: 524177 input tokens, zero output, 173 allocator-retry
 warning lines followed by a fatal GPU 1 OOM. The attention indexer's candidate
 score padding needed 1 GiB with only 808.94 MiB device-free. Last scheduled
@@ -611,7 +611,7 @@ all five built-in inference smokes passed. The same image, API overlay, GPU flag
 409600 context, 0.85 memory fraction, port/model alias, no-key access, and
 `unless-stopped` policy are preserved. Effective KV capacity remains **2272512**.
 
-The subsequent [full-400k RAM-mode repeat](BENCHMARK-FULL-PREFILL-RAM-2026-09-16.md)
+The subsequent [full-400k RAM-mode repeat](../../bench/deepseek-v4.1-flash_TP4_sglang/BENCHMARK-FULL-PREFILL-RAM-2026-09-16.md)
 completed at **01:28:28 UTC**: **409397 uncached input tokens**, correct `42`,
 **73.636 s server prefill / 5559.73 tokens/s**, and **156 recoverable allocator
 retry warning lines**. This run was isolated, with no API/fatal error or restart;
@@ -662,7 +662,7 @@ It is the only enabled GPU inference backend. `dsv4`, `dsv41-api`, and
 `qwen3-embed` remain stopped and intact; normal startup no longer launches the
 embedding model. No synthetic workload is left running.
 
-The subsequently requested [near-full-window prefill test](BENCHMARK-FULL-PREFILL-2026-09-15.md)
+The subsequently requested [near-full-window prefill test](../../bench/deepseek-v4.1-flash_TP4_sglang/BENCHMARK-FULL-PREFILL-2026-09-15.md)
 completed at 23:21 UTC: **409397 uncached input tokens**, correct `42` response,
 **75.42 s server prefill / 78.41 s client wall time**, and **109 new recoverable
 allocator retry warning lines**. No fatal OOM, API stream failure, retraction or
@@ -677,7 +677,7 @@ lines** (GPU0/1/2/3: 60/67/60/60). There was no terminal OOM, traceback, deleted
 TokenizerManager state, or restart. This establishes bounded 500k-input success,
 not memory-pressure-free operation or eight simultaneous full-context requests.
 
-At 22:25 UTC, the earlier canary's [long-call TPS baseline](BENCHMARK-LONG-TPS-2026-09-15.md)
+At 22:25 UTC, the earlier canary's [long-call TPS baseline](../../bench/deepseek-v4.1-flash_TP4_sglang/BENCHMARK-LONG-TPS-2026-09-15.md)
 also completed: three sequential 32k/131k/200k-context requests generated 22,471
 tokens at 73.1–83.3 decode tokens/s. No new allocator retries or API stream errors
 were observed in those requests. Those measurements used the original 409600-context
