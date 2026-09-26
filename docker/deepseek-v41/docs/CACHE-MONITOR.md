@@ -94,7 +94,8 @@ jq . /mnt/hot/dsv41_state/cache-monitor/current/summary.json
 ```
 
 Source: [dsv41_cache_monitor.py](../../../scripts/dsv41_cache_monitor.py).
-The [offline tests](../../../scripts/test_dsv41_cache_monitor.py) cover
+The retired local tests (`scripts/test_dsv41_cache_monitor.py` at Git revision
+`dc74842`) covered
 missing/invalid metrics, TP/model filtering, eviction semantics, resets,
 source-only reads, launch rotation, resuming after an interrupted write,
 cause-counter reconciliation, census conservation, and unavailable/stale data.

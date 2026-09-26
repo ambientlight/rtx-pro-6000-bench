@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Read /v1/loads safely; optionally wait for a stable, empty scheduler.
+"""Read /v1/loads safely and share passive-monitoring utilities.
 
-This module never starts/stops containers or sends inference requests. Keep the
-historical observer's list shape and num_reqs alias, but read the modern API.
+The CLI optionally waits for a stable, empty scheduler. It never starts/stops
+containers or sends inference requests. Keep the historical observer's list
+shape and num_reqs alias, but read the modern API.
 """
 
 import argparse
@@ -10,11 +11,16 @@ import json
 import math
 import os
 from pathlib import Path
+import re
+import subprocess
 import time
 import urllib.request
 
 
 LOAD_PATH = "/v1/loads"
+BASE_URL = "http://127.0.0.1:8000"
+INFERENCE = {"/v1/messages", "/v1/responses", "/v1/chat/completions", "/v1/completions", "/generate", "/encode"}
+COUNTER = re.compile(r"^sglang:http_requests_(active|total)\{([^}]+)\}\s+([^ ]+)(?:\s+\d+)?$")
 QUEUE_FIELDS = {"waiting", "grammar", "paused", "retracted", "prealloc_ready"}
 ACTIVE_TOKEN_FIELDS = (
     "num_used_tokens",
@@ -22,6 +28,49 @@ ACTIVE_TOKEN_FIELDS = (
     "num_active_tokens",
     "num_waiting_uncached_tokens",
 )
+
+
+def run(*command, timeout=30):
+    return subprocess.check_output(command, text=True, stderr=subprocess.PIPE, timeout=timeout)
+
+
+def atomic_json(path, value):
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_text(json.dumps(value, indent=2) + "\n")
+    temporary.replace(path)
+
+
+def fetch(path):
+    with urllib.request.urlopen(BASE_URL + path, timeout=10) as response:
+        return response.read().decode()
+
+
+def activity_metrics(text):
+    values = {"active": {}, "total": {}}
+    for line in text.splitlines():
+        match = COUNTER.fullmatch(line)
+        if not match:
+            continue
+        kind, labels, number = match.groups()
+        labels = dict(re.findall(r'(\w+)="([^"]*)"', labels))
+        endpoint = labels.get("endpoint")
+        if endpoint not in INFERENCE:
+            continue
+        value = float(number)
+        if not math.isfinite(value) or value < 0 or value != int(value):
+            raise ValueError("Invalid HTTP activity counter")
+        key = (endpoint, labels.get("method"))
+        if key in values[kind]:
+            raise ValueError("Duplicate HTTP activity counter")
+        values[kind][key] = int(value)
+    if not values["active"] or values["active"].keys() != values["total"].keys():
+        raise ValueError("Missing or incomplete HTTP inference metrics")
+    return sum(values["active"].values()), tuple(sorted(values["total"].items()))
+
+
+def mem_available():
+    fields = dict(line.split(":", 1) for line in Path("/proc/meminfo").read_text().splitlines())
+    return int(fields["MemAvailable"].split()[0]) * 1024
 
 
 def counter(value):

@@ -16,8 +16,7 @@ from pathlib import Path
 import re
 import time
 
-from dsv41_deferred_relaunch import activity_metrics, atomic_json, fetch, mem_available, run
-from dsv41_load import parse_loads
+from dsv41_load import activity_metrics, atomic_json, fetch, mem_available, parse_loads, run
 
 
 ROOT = Path("/mnt/hot/dsv41_state/cache-monitor")

@@ -40,8 +40,8 @@ keep it on a trusted network. LiteLLM frontend authentication is separate.
 2. For a scheduled change, require **60 continuous seconds** of empty scheduler
    queues and no HTTP inference activity. Use fresh `/v1/loads` and `/metrics`;
    zero running requests alone is insufficient during chunked prefill.
-   Existing one-shot rollout helpers are change-specific and fail closed on
-   identity/configuration drift. Do not reuse an old rollout job blindly.
+   The old change-specific rollout jobs have been retired. Coordinate the idle
+   window explicitly; the launcher itself does not enforce it.
 3. Immediately recheck idle, then use the authorized launch command:
 
    ```bash
@@ -92,8 +92,8 @@ kernel dependencies while reproducing that baseline.
 `scripts/dsv41_build_api_image.py` builds [Dockerfile.api](../Dockerfile.api)
 from a clean, committed overlay worktree, checks its explicit source allow-list
 and verifies packaged files and unchanged hardware-runtime fingerprints.
-The three smaller Dockerfiles and their helpers preserve specific historical
-parent images; they are **not** a sequential rebuild recipe against latest HEAD.
+Historical incremental image builders and their Dockerfiles have been retired;
+the [history index](history/README.md) identifies the Git revision retaining them.
 
 For an exact restore, follow the private
 [September 25 release archive](history/RELEASE-2026-09-25.md), noting that it
@@ -106,11 +106,17 @@ V12 rollback requires its retained image/container **and re-downloaded 0731
 weights**; those weights were intentionally removed from this workstation.
 `launch_all.sh dsv4` launches V4.1 and must not be used for V12 restoration.
 
-Offline deployment tests:
+## Maintained scripts
 
-```bash
-python3 -m unittest discover -s scripts -p 'test_dsv41*.py'
-```
+`scripts/` retains capture/monitoring, the load utility, the full image builder,
+release snapshots, API acceptance, the encoder/grammar checks and the CPU-only
+API-regression runner for the separate SGLang fork. The shared monitoring
+utilities live in `dsv41_load.py`; no retired rollout module is imported.
 
-API acceptance, long-prefill and cache-pressure scripts send inference traffic;
-run them only as part of an explicitly requested qualification.
+Local unit tests, one-shot migrations and the standalone TPS/cache-pressure
+probes have been removed from this checkout and remain recoverable from Git
+revision `dc74842`. Benchmark reports and deployment evidence are preserved.
+The SGLang fork's own API tests are unchanged.
+
+`dsv41_live_acceptance.py` sends inference requests, including its optional long
+suite. Run it only as part of an explicitly requested qualification.

@@ -7,7 +7,7 @@ no serving settings, deployment image or restart policy were changed, and no
 explicit cache flush was performed.
 
 Private evidence: `/mnt/hot/dsv41_state/cache-pressure-64x256k-bjNludyH/`.
-Runner: `scripts/dsv41_cache_pressure.py`.
+Runner: `scripts/dsv41_cache_pressure.py` (retired; preserved at Git revision `dc74842`).
 Unit: `dsv41-cache-pressure-64x256k-bjNludyH.service` (user systemd).
 
 ## Results

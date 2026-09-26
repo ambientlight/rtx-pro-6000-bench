@@ -25,3 +25,10 @@ Performance reports and the final L16 traffic comparison remain under
 Private receipt/capture paths are retained as evidence references; some captures
 have since moved to cold storage. Do not treat historical commands or container
 IDs as instructions for the running deployment.
+
+The old migration/rollout helpers, incremental Dockerfiles, one-shot systemd
+templates, benchmark probes and local unit tests were retired during cleanup.
+Their last retained version is Git revision `dc74842`; for example,
+`git show dc74842:scripts/dsv41_cache_pressure.py` reads the original runner.
+Historical references below this directory do not imply those tools remain
+installed or supported in the current checkout.

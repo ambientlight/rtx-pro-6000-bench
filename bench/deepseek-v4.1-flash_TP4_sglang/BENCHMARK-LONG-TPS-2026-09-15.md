@@ -76,7 +76,10 @@ This test did not exercise thinking-enabled output, tool calls, concurrency,
 
 ## Reproduce and preserve
 
-From the benchmark repository, with the canary idle:
+The runner and its local tests were retired from the maintained checkout;
+their last retained version is Git revision `dc74842`. These are historical
+reproduction commands, requiring that version and an explicitly authorized,
+idle deployment:
 
 ```bash
 python3 scripts/dsv41_long_tps.py

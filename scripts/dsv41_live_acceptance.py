@@ -552,7 +552,7 @@ def cache_checks(client):
     This deliberately never flushes/evicts production caches. A device hit is
     not evidence of restoring an evicted prefix from RAM.
     """
-    from dsv41_deferred_relaunch import activity_metrics
+    from dsv41_load import activity_metrics
 
     def snapshot(name):
         request = urllib.request.Request(client.base + "/metrics", headers=client.headers)

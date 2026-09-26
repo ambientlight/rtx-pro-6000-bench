@@ -41,7 +41,6 @@ Only build/launch inputs and this README live at the top level.
 |---|---|
 | [compose.api.yaml](compose.api.yaml) | Production settings and explicit runtime mounts |
 | [Dockerfile.api](Dockerfile.api) | Full API/cache/diagnostic overlay build |
-| `Dockerfile.swa-retention`, `Dockerfile.diagnostics`, `Dockerfile.cache-attribution` | Pinned incremental image recipes; historical parent dependencies |
 | [diagnostic_entrypoint.py](diagnostic_entrypoint.py) | Per-start CUDA/NCCL evidence directories |
 | [baseline.lock.json](baseline.lock.json) | Recipe/model/image pins and dated rollout receipts |
 | [compose.baseline.yaml](compose.baseline.yaml) | Original authenticated, localhost-only port-8010 baseline |
