@@ -1,4 +1,8 @@
-# Integration status — 2026-09-25 UTC
+# Deployment journal — September 15–25, 2026 UTC
+
+Archived snapshot, not live status. References to “current” below describe the
+deployment at the time of each entry. Use the [deployment README](../../README.md)
+for the checked-in profile and [operations guide](../OPERATIONS.md) for live checks.
 
 ## Current: L16 plus persistent no-swap policy, preserved release
 
@@ -8,7 +12,7 @@ startup checks at **12:43:09 UTC**. The live image remains
 bind mounts. The 67/33 split, 256 GB HiCache, RAM Engram offload and all GPU/API
 settings are unchanged. The enabled host slice now enforces `MemorySwapMax=0`.
 See [release preservation and restore](RELEASE-2026-09-25.md) and
-[the exact no-swap policy](NO-SWAP.md). Earlier entries below are historical.
+[the exact no-swap policy](../NO-SWAP.md). Earlier entries below are historical.
 
 ## Historical staging: L16, launcher log-pipe stall fix after one minute idle
 
@@ -125,7 +129,7 @@ See [RAM split details](HICACHE-SPLIT-2026-09-18.md).
 Passive follow-up: enabled `dsv41-cache-monitor.service` samples every 30 seconds
 without model changes or inference traffic. It follows launches and records
 aggregate pressure/eviction warnings under `/mnt/hot/dsv41_state/cache-monitor/`.
-Twelve dedicated monitoring tests pass. See [monitoring scope](CACHE-MONITOR.md)
+Twelve dedicated monitoring tests pass. See [monitoring scope](../CACHE-MONITOR.md)
 for the distinction between ordinary churn, boundary-loss candidates and exact
 per-prefix attribution, which is not available from these aggregate gauges.
 
@@ -147,7 +151,7 @@ and the expanded **93 deployment/helper tests** pass.
 The full CPU API regression rerun passed 1,172 tests plus 409 subtests with
 the candidate's dependencies and the working-tree overlay. Evidence:
 `/mnt/hot/dsv41_state/api-tests-UtwnSLi0/`.
-See [DIAGNOSTICS.md](DIAGNOSTICS.md); source receipt:
+See [diagnostics](../DIAGNOSTICS.md); source receipt:
 `/mnt/hot/dsv41_state/diagnostics-image-ywucbvdg/receipt.json`.
 
 Automatic device FULL / SWA capacities on this launch are **3,211,520 /
@@ -227,7 +231,7 @@ initial slot arrays, inside the 192 GB host-total budget. Effective flags were
 verified; all 68 offline tests passed. No extra synthetic inference was sent.
 There were zero container restarts; capture followed to
 `capture-20260918T020728Z-700991` with zero observed packet drops.
-See [HICACHE.md](HICACHE.md) for exact sizes, tests and qualification limits.
+See [the 192 GB record](HICACHE-192-2026-09-18.md) for exact sizes, tests and qualification limits.
 The deferred rollout's live status is
 `/mnt/hot/dsv41_state/deferred-hicache-BEJbBSuX/status.json` and its user service is
 `dsv41-hicache-relaunch@deferred-hicache-BEJbBSuX.service`.
@@ -310,7 +314,7 @@ describe the resolved cap; startup explicitly logs `mode=cap`, `swa_tokens=26112
 and `prefix_tails=32`. The main KV capacity also depends on GPU availability at
 startup, so its change is not a controlled measurement of the fraction alone.
 
-The [diagnostics configuration](DIAGNOSTICS.md) enables CUDA error logging,
+The [diagnostics configuration](../DIAGNOSTICS.md) enables CUDA error logging,
 GPU core generation on exception and SGLang's crash trigger, NCCL INFO logs,
 and an 8192-entry PyTorch flight recorder with C++ stacks and timeout dumping.
 `SYS_PTRACE` makes the existing py-spy crash snapshots possible; a native stack
@@ -371,7 +375,7 @@ Private preservation, drain and verification evidence:
 ### Subsequently requested full-window prefill — passed at 09:12 UTC
 
 The user then requested another full half-native-context prefill. The
-[exact saved 524177-token request](../../bench/deepseek-v4.1-flash_TP4_sglang/BENCHMARK-FULL-PREFILL-RESTORED-085-2026-09-16.md)
+[exact saved 524177-token request](../../../../bench/deepseek-v4.1-flash_TP4_sglang/BENCHMARK-FULL-PREFILL-RESTORED-085-2026-09-16.md)
 was replayed once at **09:10:38 UTC**, after 20 continuous idle seconds. The
 container, image, settings and cache pool were unchanged; no restart or cache
 flush was performed. Starfield was absent and no other non-health inference
@@ -406,7 +410,7 @@ All **14 live API requests** (seven before and seven after the full prefill)
 passed Responses/Messages tool streaming and continuation, thinking replay,
 and vision checks.
 
-The [exact full-window replay](../../bench/deepseek-v4.1-flash_TP4_sglang/BENCHMARK-FULL-PREFILL-V2-NONEXPANDABLE-2026-09-16.md)
+The [exact full-window replay](../../../../bench/deepseek-v4.1-flash_TP4_sglang/BENCHMARK-FULL-PREFILL-V2-NONEXPANDABLE-2026-09-16.md)
 completed at **07:10:27 UTC**: **524177 uncached input tokens**, correct `42`
 (two output tokens), **100.2432 s server prefill / 5229.05 tokens/s**, and
 **103.5697 s client wall time**. There were **208 recoverable allocator-retry
@@ -460,7 +464,7 @@ and prior-config rollback: `/mnt/hot/dsv41_state/expandable-090-YXkuqtGz/`.
 
 ## Previous successful state: v2 / 0.90 without expandable segments
 
-After the user stopped Starfield, the [exact full-window replay](../../bench/deepseek-v4.1-flash_TP4_sglang/BENCHMARK-FULL-PREFILL-V2-NO-GAME-2026-09-16.md)
+After the user stopped Starfield, the [exact full-window replay](../../../../bench/deepseek-v4.1-flash_TP4_sglang/BENCHMARK-FULL-PREFILL-V2-NO-GAME-2026-09-16.md)
 **passed at 06:24:05 UTC**: **524177 uncached input tokens**, correct `42` answer,
 **100.2216 s server prefill / 5230.18 tokens/s**, and **103.8062 s client wall time**.
 There were **210 recoverable allocation-retry warning lines**, but no fatal/API
@@ -478,7 +482,7 @@ test. The earlier RAM-residency limitation is unchanged.
 
 ### Previous full-window attempt with Starfield running
 
-The subsequently requested [full-window prefill](../../bench/deepseek-v4.1-flash_TP4_sglang/BENCHMARK-FULL-PREFILL-V2-090-2026-09-16.md)
+The subsequently requested [full-window prefill](../../../../bench/deepseek-v4.1-flash_TP4_sglang/BENCHMARK-FULL-PREFILL-V2-090-2026-09-16.md)
 **failed at 06:06:08 UTC**: 524177 input tokens, zero output, 173 allocator-retry
 warning lines followed by a fatal GPU 1 OOM. The attention indexer's candidate
 score padding needed 1 GiB with only 808.94 MiB device-free. Last scheduled
@@ -611,7 +615,7 @@ all five built-in inference smokes passed. The same image, API overlay, GPU flag
 409600 context, 0.85 memory fraction, port/model alias, no-key access, and
 `unless-stopped` policy are preserved. Effective KV capacity remains **2272512**.
 
-The subsequent [full-400k RAM-mode repeat](../../bench/deepseek-v4.1-flash_TP4_sglang/BENCHMARK-FULL-PREFILL-RAM-2026-09-16.md)
+The subsequent [full-400k RAM-mode repeat](../../../../bench/deepseek-v4.1-flash_TP4_sglang/BENCHMARK-FULL-PREFILL-RAM-2026-09-16.md)
 completed at **01:28:28 UTC**: **409397 uncached input tokens**, correct `42`,
 **73.636 s server prefill / 5559.73 tokens/s**, and **156 recoverable allocator
 retry warning lines**. This run was isolated, with no API/fatal error or restart;
@@ -662,7 +666,7 @@ It is the only enabled GPU inference backend. `dsv4`, `dsv41-api`, and
 `qwen3-embed` remain stopped and intact; normal startup no longer launches the
 embedding model. No synthetic workload is left running.
 
-The subsequently requested [near-full-window prefill test](../../bench/deepseek-v4.1-flash_TP4_sglang/BENCHMARK-FULL-PREFILL-2026-09-15.md)
+The subsequently requested [near-full-window prefill test](../../../../bench/deepseek-v4.1-flash_TP4_sglang/BENCHMARK-FULL-PREFILL-2026-09-15.md)
 completed at 23:21 UTC: **409397 uncached input tokens**, correct `42` response,
 **75.42 s server prefill / 78.41 s client wall time**, and **109 new recoverable
 allocator retry warning lines**. No fatal OOM, API stream failure, retraction or
@@ -677,7 +681,7 @@ lines** (GPU0/1/2/3: 60/67/60/60). There was no terminal OOM, traceback, deleted
 TokenizerManager state, or restart. This establishes bounded 500k-input success,
 not memory-pressure-free operation or eight simultaneous full-context requests.
 
-At 22:25 UTC, the earlier canary's [long-call TPS baseline](../../bench/deepseek-v4.1-flash_TP4_sglang/BENCHMARK-LONG-TPS-2026-09-15.md)
+At 22:25 UTC, the earlier canary's [long-call TPS baseline](../../../../bench/deepseek-v4.1-flash_TP4_sglang/BENCHMARK-LONG-TPS-2026-09-15.md)
 also completed: three sequential 32k/131k/200k-context requests generated 22,471
 tokens at 73.1–83.3 decode tokens/s. No new allocator retries or API stream errors
 were observed in those requests. Those measurements used the original 409600-context

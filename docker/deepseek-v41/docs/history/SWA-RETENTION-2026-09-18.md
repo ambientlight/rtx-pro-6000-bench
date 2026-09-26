@@ -1,5 +1,8 @@
 # SWA host retention: investigation, patch and qualification
 
+Historical investigation; upstream statuses and test results are dated September 18, 2026.
+See the [cache guide](../HICACHE.md) for the supported configuration.
+
 ## Executive summary
 
 - The older replay misses are consistent with a **component-retention mismatch**, not a TTL expiry: FULL KV survived in RAM, while eviction could discard its required SWA resumption window. The real Python cache-tree regression reproduces this miss with legacy eviction and retains all 64 prefixes with the new policy.
@@ -30,7 +33,7 @@ are outside this patch's deployment qualification.
 
 ### What failed locally
 
-The [previous live experiment](../../bench/deepseek-v4.1-flash_TP4_sglang/CACHE-PRESSURE-64X256K-2026-09-18.md) completed
+The [previous live experiment](../../../../bench/deepseek-v4.1-flash_TP4_sglang/CACHE-PRESSURE-64X256K-2026-09-18.md) completed
 64 unique 256,000-token requests and eight exact replays correctly, but seven
 older replays had zero usable cached tokens. The newest replay reused 255,744
 tokens via SWA-only RAM restore; FULL KV was still on GPU. At completion,

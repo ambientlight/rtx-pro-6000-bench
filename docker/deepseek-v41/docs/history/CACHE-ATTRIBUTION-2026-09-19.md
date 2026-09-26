@@ -1,8 +1,10 @@
 # Original rollout: cache eviction attribution and 67/33 host payload
 
-Historical 67/33 launch record. The same telemetry image is now deployed at
-[60/40](HICACHE-SPLIT-60-2026-09-20.md); the capacities below describe the
-original September 19 launch, not the current allocation.
+Historical record; see the [deployment README](../../README.md) for the supported configuration.
+
+This records the original September 19 launch. The later
+[60/40 experiment](HICACHE-SPLIT-60-2026-09-20.md) used the same telemetry image;
+neither record describes live deployment status.
 
 Initially staged without a restart; subsequently deployed after the user
 explicitly authorized relaunch. Container `17a496e4fce5` started September 19

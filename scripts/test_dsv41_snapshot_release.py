@@ -9,6 +9,15 @@ import dsv41_snapshot_release as release
 
 
 class SnapshotSafetyTest(unittest.TestCase):
+    def test_deployment_documents_exist_and_keep_archive_names(self):
+        self.assertEqual(
+            {Path(relative).name for relative in release.DEPLOYMENT_FILES},
+            {"baseline.lock.json", "NO-SWAP.md"},
+        )
+        for relative in release.DEPLOYMENT_FILES:
+            with self.subTest(relative=relative):
+                self.assertTrue((release.REPO / "docker/deepseek-v41" / relative).is_file())
+
     def test_exclusive_metadata_write_preserves_existing_file(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "manifest.json"

@@ -1,5 +1,7 @@
 # 256 GB RAM HiCache expansion — September 18, 2026 UTC
 
+Historical record; see the [cache guide](../HICACHE.md) for the supported configuration.
+
 User-approved expansion from the qualified 192 GB profile, after another
 continuous **60-second idle** window. Container `10a2a24ce3d8` started at
 **02:52:20 UTC**, passed built-in startup checks at **02:58:05 UTC**, and remains
@@ -78,7 +80,7 @@ Sustained concurrent stability and RAM-restore correctness remain unqualified.
 
 ### Subsequent 64 × 256k cache-pressure experiment
 
-The [completed long-prefill experiment](../../bench/deepseek-v4.1-flash_TP4_sglang/CACHE-PRESSURE-64X256K-2026-09-18.md)
+The [completed long-prefill experiment](../../../../bench/deepseek-v4.1-flash_TP4_sglang/CACHE-PRESSURE-64X256K-2026-09-18.md)
 ran 03:16–04:13 UTC: all 64 cold calls and eight exact replays returned correct
 answers without a restart. Seven older replays missed; the recent replay reused
 255,744 tokens in 1.285 seconds via SWA-only restoration, with FULL KV still on
@@ -102,7 +104,7 @@ Private rollout directory:
 It includes the previous 192 GB resolved Compose, old verified allocation,
 source/config identities, drain samples, startup logs, exact new allocations,
 effective flags and private E2E request/response artifacts under `acceptance/`.
-The previous rollout is documented in [HICACHE.md](HICACHE.md).
+The previous rollout is documented in [the 192 GB record](HICACHE-192-2026-09-18.md).
 
 Service: `dsv41-hicache-relaunch@deferred-hicache-256-VuxS5Php.service`.
 It completed successfully and will not repeat the relaunch. Notifications

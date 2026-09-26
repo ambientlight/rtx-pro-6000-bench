@@ -14,7 +14,7 @@ with W4A8 MoE that beat the previous custom W4A4 stack in all matched benchmarks
 
 Upgrade to dsv4.1-flash saw substantail performance gains in prefill and decode but needed caching fixes, 256GB RAM L2 HiCache enabled to exceeed previous dsv4-flash-0731 96% avarage. Mean per-request decode went **48.8 → 97.9 tok/s**. Building on
 [0xSero's SM120 recipe](https://github.com/0xSero/deepseek-v4.1-flash-4x-rtx-pro-6000),
-we added [SWA-boundary retention](docker/deepseek-v41/SWA-RETENTION-2026-09-18.md)
+we added [SWA-boundary retention](docker/deepseek-v41/docs/history/SWA-RETENTION-2026-09-18.md)
 and tuned **256 GB RAM HiCache to 67% SWA / 33% FULL KV by bytes**. That RAM
 cache contributed additional **3.62%**, bringing combined L1 + L2 coverage to **97.82%**. The
 [Level1Techs post](https://forum.level1techs.com/p/4119105) provides the original

@@ -1,5 +1,7 @@
 # L15: restore L13's 67% SWA / 33% FULL host-cache split
 
+Historical record; see the [cache guide](../HICACHE.md) for the supported configuration.
+
 The user selected 67/33 after observing better RAM-cache coverage in L13 and
 authorized recreation **only after all traffic drains plus one continuous
 minute idle**. This is a configuration-only rollout, not a new model image or

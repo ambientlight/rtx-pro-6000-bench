@@ -22,6 +22,7 @@ from dsv41_build_api_image import API_FILES
 REPO = Path(__file__).resolve().parents[1]
 SGLANG = Path("/mnt/hot/ambientlight/repos/sglang-dsv41-production-overlay")
 PREFIX = "/sgl-workspace/sglang/python/sglang/srt/"
+DEPLOYMENT_FILES = ("baseline.lock.json", "docs/NO-SWAP.md")
 
 
 def run(*args):
@@ -130,8 +131,9 @@ def snapshot(output, container):
     for name in ("config.json", "generation_config.json", "model.safetensors.index.json"):
         if (model / name).is_file():
             private_copy(model / name, output / "model-metadata" / name)
-    for name in ("baseline.lock.json", "NO-SWAP.md"):
-        private_copy(REPO / "docker/deepseek-v41" / name, output / "deployment" / name)
+    for relative in DEPLOYMENT_FILES:
+        # Keep the release archive's flat filenames stable after doc moves.
+        private_copy(REPO / "docker/deepseek-v41" / relative, output / "deployment" / Path(relative).name)
     after = json.loads(run("docker", "inspect", container))[0]
     if (before["Id"], before["State"]["StartedAt"], before["RestartCount"]) != (
         after["Id"], after["State"]["StartedAt"], after["RestartCount"]

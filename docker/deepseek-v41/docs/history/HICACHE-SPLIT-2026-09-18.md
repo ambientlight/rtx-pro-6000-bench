@@ -1,5 +1,7 @@
 # RAM HiCache payload split: 23.6% SWA / 76.4% FULL
 
+Historical record; see the [cache guide](../HICACHE.md) for the supported configuration.
+
 ## Scope and configuration
 
 User-approved RAM-only rebalance, deployed September 18, 2026. Keeps the existing

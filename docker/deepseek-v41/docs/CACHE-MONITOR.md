@@ -1,7 +1,7 @@
 # Passive FULL/SWA RAM-cache monitoring
 
-`dsv41-cache-monitor.service` is an enabled user-systemd service sampling the
-current `dsv41` deployment approximately every 30 seconds. Existing user linger
+[`dsv41-cache-monitor.service`](../../../systemd/dsv41-cache-monitor.service)
+samples the selected `dsv41` deployment approximately every 30 seconds. User linger
 allows it to run without an interactive login. It resumes collection when the
 container comes back after a restart. It sends **only GET `/v1/loads` and
 `/metrics`**, plus read-only Docker inspection and host-memory reads.
@@ -22,7 +22,7 @@ and printed to the service journal for subsequent review.
   their aggregate-across-ranks scope; they are not unique request-token counts.
 - Running/waiting requests, active tokens, HTTP activity and available RAM.
 - Container identity, sample timestamps, counter resets and telemetry outages.
-- When the staged cache-attribution image is active: separate pressure causes
+- On the cache-attribution image: separate pressure causes
   and FULL co-removal for total/boundary SWA evictions; unique host FULL coverage
   by usable SWA endpoints; marked/unmarked SWA residency; SWA-limited lookup
   counters. Old or unsupported images report these fields as **null**.
@@ -34,7 +34,7 @@ and cannot produce negative eviction deltas against the previous launch.
 
 ## Attribution, residency and legacy warning heuristics
 
-The new image exports six disjoint cause/disposition cells for each eviction
+The cache-attribution image exports six disjoint cause/disposition cells for each eviction
 counter. The monitor selects rank 0 and requires their sums to equal the legacy
 totals. Trigger (`swa_pressure`, `full_pressure`, `other`) and disposition
 (`swa_only`, `with_full`) are independent: SWA pressure can evict FULL too.
@@ -48,7 +48,7 @@ snapshot aged 0–150 seconds, using its own tree-residency denominator. Failed
 or stale scans report that derived fraction as null. Complete census values
 must conserve `tree = covered + SWA-uncovered + FULL-chain-gap`.
 
-See [source definitions and staging](CACHE-ATTRIBUTION-2026-09-19.md). Lookup
+See [source definitions and rollout](history/CACHE-ATTRIBUTION-2026-09-19.md). Lookup
 loss is counted per lookup, including retries, not per completed request.
 
 | Condition | Recorded flag |
@@ -66,8 +66,8 @@ On the old image, these aggregate counters **cannot establish that a particular 
 prefix survived its SWA window, or that a later request missed because of it**.
 Boundary counters also include FULL-driven eviction, and occupancy is measured
 at observation time, not at the instant of each eviction. Such warnings identify
-intervals to correlate with request captures; precise victim attribution would
-require the staged TreeCore instrumentation; the passive collector itself does
+intervals to correlate with request captures; precise victim attribution requires
+the cache-attribution TreeCore instrumentation. The passive collector itself does
 not inspect or modify the live tree.
 
 ## Data and operation
@@ -93,8 +93,8 @@ journalctl --user -u dsv41-cache-monitor.service
 jq . /mnt/hot/dsv41_state/cache-monitor/current/summary.json
 ```
 
-Source: `scripts/dsv41_cache_monitor.py`; service definition:
-`systemd/dsv41-cache-monitor.service`. Eighteen dedicated offline tests cover
+Source: [dsv41_cache_monitor.py](../../../scripts/dsv41_cache_monitor.py).
+The [offline tests](../../../scripts/test_dsv41_cache_monitor.py) cover
 missing/invalid metrics, TP/model filtering, eviction semantics, resets,
 source-only reads, launch rotation, resuming after an interrupted write,
 cause-counter reconciliation, census conservation, and unavailable/stale data.

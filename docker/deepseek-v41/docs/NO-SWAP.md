@@ -3,20 +3,6 @@
 The September 25, 2026 deployment policy disables swap for `dsv41` and its
 descendants, while leaving the host swapfile available to other applications.
 
-## Applied deployment
-
-Recreated `dsv41` at **2026-09-25 12:35:58 UTC** as container `9137db3cfdc7`.
-Readiness recorded at **12:43:09 UTC**: healthy, HTTP 200, zero restarts, and
-arithmetic, structured-output, tool-round-trip, and native-vision startup checks
-passed. The parent swap limit and both parent/container swap usage were **0**.
-The slice is enabled for boot; physical RAM remains uncapped. Capture and the
-cache monitor followed the new deployment. Available host RAM was about
-**36.3 GiB**, with the 128 GiB host swapfile still enabled for other workloads.
-
-The frozen candidate, private rollback evidence, and completion receipt are in
-`/mnt/hot/dsv41_state/noswap-rollout-hezHXiLs/`. `complete.json` records the
-verification; image, inference environment, and runtime mounts were unchanged.
-
 ## Configuration
 
 - Install `systemd/dsv41.slice` from this repository as
@@ -36,9 +22,8 @@ Docker `mem_limit`, or cache-budget reduction is introduced. The image, frozen
 SGLang overlays, RAM Engram offload, 256 GB L2 budget, and 67% SWA / 33% FULL
 split remain unchanged. Global swappiness and the host swapfile are not changed.
 
-The production recreation is derived from the running deployment's frozen
-Compose profile, adding only `cgroup_parent`. This preserves its exact image
-and source mounts; the repository Compose is also updated for future launches.
+Commands above run from the repository root. Changing the parent of an existing
+container requires recreation after traffic drains.
 
 ## Checking the effective policy
 
@@ -73,3 +58,10 @@ policy and reload/restart the slice when it has no active containers. Do not
 stop an occupied slice, which can also stop its member containers. Keep the
 host swapfile enabled. Historical frozen profiles predating this policy do
 not provide no-swap protection.
+
+## Original verification
+
+The September 25 rollout passed startup checks at 12:43:09 UTC with parent
+swap limit and usage both zero. The frozen profile and `complete.json` receipt
+remain in `/mnt/hot/dsv41_state/noswap-rollout-hezHXiLs/`.
+That receipt's container identity and available-RAM reading are not live status.

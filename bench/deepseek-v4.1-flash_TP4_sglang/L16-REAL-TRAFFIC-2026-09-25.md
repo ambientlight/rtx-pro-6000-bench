@@ -13,11 +13,11 @@ RAM Engram offload, and a **256,000,000,000-byte host-total HiCache budget**.
 Its tensor payload was split **67% SWA / 33% FULL KV by bytes**; allocator
 allowances and page rounding remain within the total budget.
 
-Our [request-boundary retention policy](../../docker/deepseek-v41/SWA-RETENTION-2026-09-18.md)
+Our [request-boundary retention policy](../../docker/deepseek-v41/docs/history/SWA-RETENTION-2026-09-18.md)
 evicts ordinary intermediate SWA checkpoints before completed-request windows.
 Keeping the resumption window lets an otherwise valid FULL prefix be reused
 after GPU eviction. The preference is bounded: boundary windows can still be
-evicted under pressure. The [67/33 allocation](../../docker/deepseek-v41/HICACHE-SPLIT-67-L15-2026-09-20.md)
+evicted under pressure. The [67/33 allocation](../../docker/deepseek-v41/docs/history/HICACHE-SPLIT-67-L15-2026-09-20.md)
 provides more SWA capacity without increasing the host-total budget.
 
 ## Final measurements

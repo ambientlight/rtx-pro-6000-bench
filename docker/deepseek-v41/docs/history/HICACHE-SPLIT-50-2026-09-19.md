@@ -1,5 +1,7 @@
 # Scheduled 50/50 SWA/FULL RAM HiCache payload split
 
+Historical record; see the [cache guide](../HICACHE.md) for the supported configuration.
+
 User-approved September 18 PDT / September 19 UTC. This is a configuration-only
 follow-up to [the 23.6% rollout](HICACHE-SPLIT-2026-09-18.md).
 

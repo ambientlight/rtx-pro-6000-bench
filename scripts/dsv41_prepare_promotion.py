@@ -86,7 +86,7 @@ def main():
     ):
         if (old_state / name).exists():
             shutil.copy2(old_state / name, backup / name)
-    save(backup / "status-before.md", (ROOT / "docker/deepseek-v41/STATUS.md").read_text())
+    save(backup / "status-before.md", (ROOT / "docker/deepseek-v41/docs/history/STATUS.md").read_text())
     target.mkdir(mode=0o700)
     for name in ("api-key", "verification.json"):
         shutil.copy2(old_state / name, target / name)

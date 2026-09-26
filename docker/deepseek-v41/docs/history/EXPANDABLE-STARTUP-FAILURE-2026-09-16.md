@@ -1,5 +1,7 @@
 # Expandable-segments rollout — startup correctness failure
 
+Historical record; see the [deployment README](../../README.md) for the supported configuration.
+
 The requested 0.90 / expandable-segments relaunch was attempted with Starfield
 closed, but **startup correctness failed before the 524k prefill test**. The
 failed experiment was intentionally stopped. A second capped experiment also
@@ -110,7 +112,7 @@ acceptance requests before it and seven afterward. No restart or fatal/API error
 occurred. There were **208 recoverable allocator-retry warning lines** during
 the full prefill; disabling expandable segments restores correctness here, not
 memory-pressure-free operation. See the
-[retest report](../../bench/deepseek-v4.1-flash_TP4_sglang/BENCHMARK-FULL-PREFILL-V2-NONEXPANDABLE-2026-09-16.md).
+[retest report](../../../../bench/deepseek-v4.1-flash_TP4_sglang/BENCHMARK-FULL-PREFILL-V2-NONEXPANDABLE-2026-09-16.md).
 
 This controlled configuration comparison strongly implicates an allocator-mode
 interaction in the pinned runtime. It does not establish its internal mechanism

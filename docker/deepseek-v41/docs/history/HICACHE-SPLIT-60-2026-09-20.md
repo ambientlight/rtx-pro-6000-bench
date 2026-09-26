@@ -1,5 +1,7 @@
 # 60% SWA / 40% FULL RAM-cache payload rollout
 
+Historical record; see the [cache guide](../HICACHE.md) for the supported configuration.
+
 The user explicitly requested an immediate restart, replacing the 67/33 split.
 The idle gate was bypassed; the existing 90-second stop grace period was kept.
 No image, runtime-source, API, model, GPU or retention-policy change accompanies

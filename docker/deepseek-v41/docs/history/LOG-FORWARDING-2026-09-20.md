@@ -1,5 +1,7 @@
 # L16: binary-safe, supervised launcher logs
 
+Historical record; see the [deployment README](../../README.md) for the supported configuration.
+
 Status at preparation: **armed, waiting for 60 continuous idle seconds**. The
 currently serving L15 container is not hot-patched. The authoritative ongoing
 status is:
