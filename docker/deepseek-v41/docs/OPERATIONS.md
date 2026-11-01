@@ -23,7 +23,7 @@ not in this runbook.
   `memlock`, already set in Compose.
 
 RAM startup checks require the Engram backing-file sizes, the full host-cache
-budget and another 24 GiB available: approximately **451.5 GiB** for this profile.
+budget and another 24 GiB available: approximately **213.1 GiB** with L2 disabled.
 This is a startup check, not a reservation against other applications. No-swap
 does not prevent a host OOM.
 

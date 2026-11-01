@@ -58,7 +58,8 @@ trap stop_children TERM INT EXIT
 # Native level-3 logging contains request.received/request.finished records with
 # rendered inputs, raw generated output, token IDs, and scheduler metadata. The
 # wire recorder independently retains the exact HTTP request and response bytes.
-docker logs --follow --timestamps --since "${started_iso}" "${container}" \
+# Bound startup replay: --since alone scans the container's entire log history.
+docker logs --follow --timestamps --tail 1000 --since "${started_iso}" "${container}" \
   >"${session_dir}/dsv4-native.log" 2>&1 &
 native_log_pid=$!
 

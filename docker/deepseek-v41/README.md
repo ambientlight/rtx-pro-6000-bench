@@ -1,7 +1,7 @@
 # DeepSeek-V4.1-Flash on 4× RTX PRO 6000
 
 Production deployment files for the 0xSero-based SM120 runtime, with our
-Responses/Messages API fixes, SWA-boundary retention, cache telemetry and crash
+Responses/Messages API fixes, GPU prefix caching, cache telemetry and crash
 diagnostics. The public model alias remains `deepseek-v4-flash`.
 
 This page describes the checked-in profile, not a live health report.
@@ -23,14 +23,15 @@ may use frozen Compose/source snapshots; a Git edit does not update them.
 | Static memory fraction / max running requests | 0.87 / 8 |
 | GPU KV capacity / expandable segments | Automatic / disabled |
 | Engram | RAM offload; `DSV41_CACHE_GIB=0` |
-| RAM HiCache | 256 GB host-total; 67% SWA / 33% FULL tensor payload |
+| RAM HiCache | Disabled; host-total budget is zero |
 | Sampling defaults | Temperature 1.0; top-p 0.95; output budget 32,768 |
 | Reasoning default | `high`; explicit caller settings take precedence |
 | Restart / host memory policy | `unless-stopped` / `dsv41.slice`, no swap |
 | Backend authentication | Disabled for compatibility; trusted-network access only |
 
-The cache split is by **bytes**, not slots, and does not control GPU pools.
-Automatic GPU capacity depends on memory available at startup. The context
+Host L2 KV caching is disabled to make RAM available for the eight CI runners.
+Engram RAM offload and GPU KV caching remain enabled. Automatic GPU capacity
+depends on memory available at startup. The context
 limit is not a guarantee of eight simultaneous full-window requests.
 
 ## Files and guides
@@ -41,7 +42,7 @@ Only build/launch inputs and this README live at the top level.
 |---|---|
 | [compose.api.yaml](compose.api.yaml) | Production settings and explicit runtime mounts |
 | [Dockerfile.api](Dockerfile.api) | Full API/cache/diagnostic overlay build |
-| [diagnostic_entrypoint.py](diagnostic_entrypoint.py) | Per-start CUDA/NCCL evidence directories |
+| [diagnostic_entrypoint.py](diagnostic_entrypoint.py) | Per-start CUDA/NCCL diagnostic directories |
 | [baseline.lock.json](baseline.lock.json) | Recipe/model/image pins and dated rollout receipts |
 | [compose.baseline.yaml](compose.baseline.yaml) | Original authenticated, localhost-only port-8010 baseline |
 | [Operations](docs/OPERATIONS.md) | Prerequisites, launch, capture, builds and recovery |

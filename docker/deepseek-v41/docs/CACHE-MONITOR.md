@@ -3,8 +3,9 @@
 [`dsv41-cache-monitor.service`](../../../systemd/dsv41-cache-monitor.service)
 samples the selected `dsv41` deployment approximately every 30 seconds. User linger
 allows it to run without an interactive login. It resumes collection when the
-container comes back after a restart. It sends **only GET `/v1/loads` and
-`/metrics`**, plus read-only Docker inspection and host-memory reads.
+container comes back after a restart. It sends **only GET `/v1/loads`,
+`/metrics` and `/get_server_info`**, plus read-only Docker inspection and
+host-memory reads.
 
 There is no inference traffic, cache flush, auto-tuning, model restart, external
 notification, or model-source change. Warning observations are saved locally
@@ -27,7 +28,12 @@ and printed to the service journal for subsequent review.
   by usable SWA endpoints; marked/unmarked SWA residency; SWA-limited lookup
   counters. Old or unsupported images report these fields as **null**.
 
-Missing required gauges make a sample unavailable, not zero. Optional
+When `/get_server_info` reports `enable_hierarchical_cache=false`, the monitor
+records `l2_enabled=false` and the `l2_disabled` flag. L2 occupancy, eviction
+totals and derived fractions are null; request activity, GPU cached-token
+counters and available host RAM continue to be recorded.
+
+With L2 enabled, missing required gauges make a sample unavailable. Optional
 lazy-exported hit/transfer counters remain null until observed; their first
 appearance establishes a delta baseline. A new launch gets a separate directory
 and cannot produce negative eviction deltas against the previous launch.

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Passive RAM-cache pressure telemetry. Only GET /metrics and /v1/loads.
+"""Passive cache telemetry using metrics, load snapshots and server settings.
 
 Pool occupancy cannot prove per-prefix survival or attribute a future miss.
 Boundary evictions with spare FULL capacity are warning candidates, not a
@@ -70,7 +70,7 @@ LINE = re.compile(r"^sglang:([a-zA-Z0-9_:]+)(?:\{(.*)\})?\s+(\S+)(?:\s+\d+)?$")
 LABEL = re.compile(r'(\w+)="((?:[^"\\]|\\.)*)"')
 
 
-def read_metrics(raw):
+def read_metrics(raw, *, l2_enabled=True):
     wanted = set(CORE.values()) | {name for name, _ in OPTIONAL.values()} | set(DIAGNOSTIC.values()) | set(CAUSE_METRICS.values())
     series = {}
     for line in raw.splitlines():
@@ -88,17 +88,20 @@ def read_metrics(raw):
         series.setdefault(name, []).append((labels, value if is_time else int(value)))
     result = {}
     for key, name in CORE.items():
+        if not l2_enabled:
+            result[key] = None
+            continue
         values = [value for labels, value in series.get(name, [])
                   if labels.get("tp_rank") == "0" and labels.get("pp_rank", "0") == "0"]
         if len(values) != 1:
             raise ValueError(f"Missing or ambiguous rank-0 metric {name}")
         result[key] = values[0]
-    if result["retention_enabled"] not in (0, 1):
+    if l2_enabled and result["retention_enabled"] not in (0, 1):
         raise ValueError("Invalid retention flag")
-    for pool in ("full", "swa"):
+    for pool in ("full", "swa") if l2_enabled else ():
         if not 0 <= result[f"{pool}_used"] <= result[f"{pool}_capacity"] or result[f"{pool}_capacity"] <= 0:
             raise ValueError(f"Invalid {pool} pool occupancy")
-    if result["boundary_evicted"] > result["swa_evicted"]:
+    if l2_enabled and result["boundary_evicted"] > result["swa_evicted"]:
         raise ValueError("Boundary evictions cannot exceed all SWA evictions")
     for key, (name, selector) in OPTIONAL.items():
         values = [value for labels, value in series.get(name, [])
@@ -159,13 +162,18 @@ def container():
 
 def sample():
     before = container()
+    settings = json.loads(fetch("/get_server_info"))
+    l2_enabled = settings.get("enable_hierarchical_cache")
+    if not isinstance(l2_enabled, bool):
+        raise ValueError("Missing hierarchical-cache setting")
     loads = parse_loads(json.loads(fetch("/v1/loads")))
     raw = fetch("/metrics")
-    metrics = read_metrics(raw)
+    metrics = read_metrics(raw, l2_enabled=l2_enabled)
     active, arrivals = activity_metrics(raw)
     if container() != before:
         raise RuntimeError("Container changed during sample")
     return {"at": time.time(), "container": before, "metrics": metrics,
+            "l2_enabled": l2_enabled,
             "running_requests": sum(row["num_running_reqs"] for row in loads),
             "waiting_requests": sum(row["num_waiting_reqs"] for row in loads),
             "active_tokens": sum(row["num_active_tokens"] for row in loads),
@@ -183,6 +191,15 @@ def analyze(current, previous, *, full_headroom=0.80, swa_pressure=0.90):
     cache_reset = any(key in resets for key in ("swa_evicted", "boundary_evicted"))
     deltas = {key: metrics[key] - prior[key] if not cache_reset and metrics.get(key) is not None
               and prior.get(key) is not None and key not in resets else None for key in COUNTERS}
+    if not current.get("l2_enabled", True):
+        return {"full_used_fraction": None, "swa_used_fraction": None, "deltas": deltas,
+                "ordinary_swa_slots_evicted_delta": None,
+                "flags": ["l2_disabled"] + (["counter_reset"] if resets else []),
+                "counter_resets": resets,
+                "interval_seconds": current["at"] - previous["at"] if same else None,
+                "census_age_seconds": None,
+                "full_swa_uncovered_fraction_of_tree_host_tokens": None,
+                "classification": "l2_disabled"}
     if all(deltas[key] is not None for key in ("swa_evicted", "boundary_evicted")):
         ordinary = deltas["swa_evicted"] - deltas["boundary_evicted"]
         if ordinary < 0:
@@ -234,8 +251,10 @@ def record(root, current, previous):
     summary_path = folder / "summary.json"
     summary = json.loads(summary_path.read_text()) if summary_path.exists() else {
         "monitoring_started_at": current["at"], "samples": 0,
-        "peak_full_used_fraction": 0, "peak_swa_used_fraction": 0,
-        "observed_boundary_slots_evicted": 0, "observed_swa_slots_evicted": 0,
+        "peak_full_used_fraction": 0 if current.get("l2_enabled", True) else None,
+        "peak_swa_used_fraction": 0 if current.get("l2_enabled", True) else None,
+        "observed_boundary_slots_evicted": 0 if current.get("l2_enabled", True) else None,
+        "observed_swa_slots_evicted": 0 if current.get("l2_enabled", True) else None,
         "counter_resets": 0, "boundary_eviction_with_full_headroom_intervals": 0,
     }
     # The per-launch summary is the atomic checkpoint. A collector crash
@@ -244,13 +263,14 @@ def record(root, current, previous):
     analyzed = analyze(current, previous)
     current = {**current, "analysis": analyzed}
     summary.update(last_sample_at=current["at"], container=current["container"], latest_analysis=analyzed,
-                   latest_metrics=current["metrics"], latest_sample=current)
+                   latest_metrics=current["metrics"], latest_sample=current,
+                   l2_enabled=current.get("l2_enabled", True))
     summary["samples"] += 1
     summary["counter_resets"] += bool(analyzed["counter_resets"])
-    for pool in ("full", "swa"):
+    for pool in ("full", "swa") if current.get("l2_enabled", True) else ():
         key = f"peak_{pool}_used_fraction"
         summary[key] = max(summary[key], analyzed[f"{pool}_used_fraction"])
-    for kind in ("swa", "boundary"):
+    for kind in ("swa", "boundary") if current.get("l2_enabled", True) else ():
         summary[f"observed_{kind}_slots_evicted"] += analyzed["deltas"][f"{kind}_evicted"] or 0
     if "boundary_eviction_with_full_headroom" in analyzed["flags"]:
         summary["boundary_eviction_with_full_headroom_intervals"] += 1
@@ -264,7 +284,8 @@ def record(root, current, previous):
     atomic_json(summary_path, summary)
     atomic_json(root / "latest.json", current)
     atomic_json(root / "status.json", {"state": "monitoring", "updated_at": current["at"],
-                                      "launch_directory": str(folder), "flags": analyzed["flags"]})
+                                      "launch_directory": str(folder), "flags": analyzed["flags"],
+                                      "l2_enabled": current.get("l2_enabled", True)})
     temporary = root / "current.tmp"
     if temporary.is_symlink():
         temporary.unlink()
