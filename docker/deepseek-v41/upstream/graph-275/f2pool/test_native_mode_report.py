@@ -1,9 +1,28 @@
 import unittest
+from pathlib import Path
+from tempfile import TemporaryDirectory
 
 from native_mode_report import embedded_points
+from native_report import configured_slice_tiles, idle_rate
 
 
 class MatchingIdleWindows(unittest.TestCase):
+    def test_large_slices_warm_after_nine_graphs(self):
+        with TemporaryDirectory() as tmp:
+            config = Path(tmp) / "config.json"
+            self.assertEqual(configured_slice_tiles(config), 188)
+            config.write_text('{"tiles": 3008}')
+            tiles = configured_slice_tiles(config)
+        broker = [dict(event="native_release", epoch=1, monotonic_ns=0)]
+        records = {i: [dict(event="native_work", epoch=1, graphs=8 if t < 3 else 9,
+                            tiles=t*3008, time=t, monotonic_ns=t*10**9) for t in range(1, 7)]
+                   for i in range(4)}
+        control = [[dict(elapsed=0), dict(elapsed=2)] for _ in range(4)]
+        epoch, points = embedded_points(records, broker, control, 0, 0, slice_tiles=tiles)
+        self.assertEqual(epoch, 1)
+        self.assertEqual([[p["time"] for p in rank] for rank in points], [[3, 5]] * 4)
+        self.assertEqual(idle_rate(records, broker, 6*10**9, slice_tiles=tiles)["common_seconds"], 3)
+
     def test_ignores_closed_epochs_and_partially_warmed_ranks(self):
         broker = [dict(event="native_release", epoch=1, monotonic_ns=10**9),
                   dict(event="native_demand", epoch=2, monotonic_ns=4*10**9),

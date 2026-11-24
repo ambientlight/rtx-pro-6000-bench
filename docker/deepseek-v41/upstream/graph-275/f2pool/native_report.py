@@ -8,11 +8,27 @@ from pathlib import Path
 import statistics
 
 TILE_MACS = 160*256*65536
+TILES_PER_NONCE = 26_112
+ORIGINAL_SLICE_TILES = 188
 RANKS = range(4)
 
 
 def read(path):
     return json.loads(path.read_text())
+
+
+def configured_slice_tiles(config_path):
+    try:
+        return read(config_path).get("tiles", ORIGINAL_SLICE_TILES)
+    except FileNotFoundError:
+        # Older exported measurements omitted the private miner config.
+        return ORIGINAL_SLICE_TILES
+
+
+def slice_graph_count(tiles):
+    if not 1 <= tiles <= TILES_PER_NONCE:
+        raise ValueError(f"K780 slice size must be between 1 and {TILES_PER_NONCE} tiles")
+    return (TILES_PER_NONCE + tiles - 1) // tiles
 
 
 def lines(path):
@@ -55,16 +71,17 @@ def live_shares(events):
                 unacknowledged=len(pending)-len(replies))
 
 
-def idle_rate(events, broker, cutoff):
+def idle_rate(events, broker, cutoff, *, slice_tiles=ORIGINAL_SLICE_TILES):
     # Require an uninterrupted four-rank idle epoch. Each counter interval must be wholly inside
     # the common epoch; independent 1 s sampling introduces a small skew between the four spans.
     released={x["epoch"]:x["monotonic_ns"] for x in broker if x["event"]=="native_release"}
     closed={x["epoch"]-1:x["monotonic_ns"] for x in broker if x["event"]=="native_demand"}
+    expected_graphs = slice_graph_count(slice_tiles)
     candidates=[]
     for epoch, start in released.items():
         finish=min(closed.get(epoch,cutoff),cutoff)
         points=[[r for r in events[i] if r["event"]=="native_work" and r["epoch"]==epoch and
-                 r["graphs"]==139 and start <= r["monotonic_ns"] <= finish] for i in RANKS]
+                 r["graphs"]==expected_graphs and start <= r["monotonic_ns"] <= finish] for i in RANKS]
         if any(len(p)<2 for p in points):
             continue
         common=(min(p[-1]["monotonic_ns"] for p in points)-max(p[0]["monotonic_ns"] for p in points))/1e9
@@ -220,7 +237,8 @@ def report(run):
     graph_dir=Path(__file__).resolve().parents[1]
     baseline=read(graph_dir/"direct-calibration.json")["calibration"]
     last=max(row["monotonic_ns"] for batch in events.values() for row in batch if row["event"]=="native_work")
-    sustained=idle_rate(events,broker,last)
+    slice_tiles = configured_slice_tiles(run / "config.json")
+    sustained=idle_rate(events,broker,last,slice_tiles=slice_tiles)
     sustained["pct_of_standalone"]=100*sustained["total_tmac_s"]/baseline["total_tmac_s"]
     sustained["hardware"]=idle_hardware(power_rows,sustained)
     additional={}
@@ -237,7 +255,7 @@ def report(run):
     return dict(ownership=read(run/"ownership.json"),stage=read(run/"staged.json"),stock=bench(stock),joined=bench(joined),
                 matched_token_budgets=True,output_hash_matches=sum(a["output_sha256"]==b["output_sha256"] for a,b in zip(stock,joined)),
                 transition_requests=len(stress),transition_http_200=sum(r["http"]==200 for r in stress),
-                timings=timings(joined+stress,broker,events), idle=idle_rate(events,broker,after["monotonic_ns"]),
+                timings=timings(joined+stress,broker,events), idle=idle_rate(events,broker,after["monotonic_ns"],slice_tiles=slice_tiles),
                 direct_pool={i:live_shares(events[i]) for i in RANKS},gpu_job_setup_ms=quantiles(setup),
                 tickets_by_rank=phase,inference_pool={k:after["pool"][k]-before["pool"][k] for k in ("submitted","accepted","rejected")},
                 qualification_inference_pool={k:sum(int(session[k]) for session in pool_sessions)

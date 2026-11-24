@@ -7,7 +7,9 @@ from pathlib import Path
 from statistics import mean, median
 
 from native_check import logs
-from native_report import RANKS, TILE_MACS, lines, timings
+from native_report import (
+    ORIGINAL_SLICE_TILES, RANKS, TILE_MACS, configured_slice_tiles, lines, slice_graph_count, timings,
+)
 from throughput import write
 
 
@@ -39,15 +41,16 @@ def mining_result(ranks, telemetry):
                 common_seconds=min(ends)-max(starts), start_utc=max(starts), end_utc=min(ends))
 
 
-def embedded_points(records, broker, control, last_request, warm):
+def embedded_points(records, broker, control, last_request, warm, *, slice_tiles=ORIGINAL_SLICE_TILES):
     # Compare each 30-second standalone counter interval to the same elapsed duration
     # on its embedded rank. Every sample must fall in one uninterrupted four-rank lease.
+    expected_graphs = slice_graph_count(slice_tiles)
     closes = {x["epoch"]-1:x["monotonic_ns"] for x in broker if x["event"]=="native_demand"}
     for release in broker:
         if release["event"]!="native_release" or release["monotonic_ns"]<last_request-1e9:
             continue
         epoch = release["epoch"]
-        points = [[e for e in records[i] if e["event"]=="native_work" and e["graphs"]==139 and
+        points = [[e for e in records[i] if e["event"]=="native_work" and e["graphs"]==expected_graphs and
                    e["epoch"]==epoch and e["monotonic_ns"]<closes.get(epoch,float("inf"))] for i in RANKS]
         if any(not p for p in points):
             continue
@@ -105,12 +108,14 @@ def report(bench, run, out):
             raise ValueError("Inference inputs or decode budgets differ")
     requests = [row for row in serving["rows"] if row.get("session")==run.name] + read(bench/"transitions.json")["rows"]
     records, broker = logs(run), lines(run/"broker.jsonl")
-    epoch, embedded = embedded_points(records,broker,control,max(r["end_ns"] for r in requests),capture["warm_seconds"])
+    slice_tiles = configured_slice_tiles(run / "config.json")
+    epoch, embedded = embedded_points(records, broker, control, max(r["end_ns"] for r in requests),
+                                      capture["warm_seconds"], slice_tiles=slice_tiles)
     standalone = mining_result(control,telemetry)
     native = mining_result(embedded,telemetry)
     historical = read(Path(__file__).resolve().parents[1]/"direct-calibration.json")["calibration"]
     calibration = [[dict(elapsed=0),dict(elapsed=historical["seconds"])] for _ in RANKS]
-    burst_epoch, burst = embedded_points(records,broker,calibration,last_request=0,warm=0)
+    burst_epoch, burst = embedded_points(records,broker,calibration,last_request=0,warm=0,slice_tiles=slice_tiles)
     early = mining_result(burst,telemetry)
     for field in ("accepted","rejected"):
         native[field] = [sum(e["event"]=="share" and e["accepted"]==(field=="accepted") and
@@ -124,7 +129,8 @@ def report(bench, run, out):
     starts = [row["gpu_seen_ns"] for rank in records.values() for row in rank if row["event"]=="native_reentry"]
     if any(begin <= tick < end for begin,end in parked for tick in starts):
         raise ValueError("A K780 GPU re-entry overlapped exclusive serving ownership")
-    stats = dict(mode="non-joined", k780_slice_tiles=188, idle_epoch=epoch, standalone_binary_sha256=capture["binary_sha256"],
+    stats = dict(mode="non-joined", k780_slice_tiles=slice_tiles, standalone_k780_slice_tiles=capture.get("slice_tiles", ORIGINAL_SLICE_TILES),
+                 idle_epoch=epoch, standalone_binary_sha256=capture["binary_sha256"],
                  standalone=standalone, embedded=native, embedded_pct_standalone=100*native["total_tmac_s"]/standalone["total_tmac_s"],
                  inference={s["mode"]:summary(s) for s in (joined,serving)}, paired_prompts=len(joined["rows"]),
                  timing=timing, requests_for_timing=len(requests), audited_serving_intervals=len(parked),
@@ -155,7 +161,8 @@ def report(bench, run, out):
         old_records, old_broker = logs(directory),lines(directory/"broker.jsonl")
         sample_requests = [r for r in serving["rows"] if r["session"]==name]
         stats["handoffs_by_session"][name] = timings(sample_requests,old_broker,old_records)
-        _, points = embedded_points(old_records,old_broker,calibration,last_request=0,warm=0)
+        _, points = embedded_points(old_records,old_broker,calibration,last_request=0,warm=0,
+                                    slice_tiles=configured_slice_tiles(directory / "config.json"))
         first_samples[name] = mining_result(points,telemetry)["total_tmac_s"]
     stats["six_second_comparison"]["first_tmac_s_by_session"] = first_samples
     joined_path = bench/"joined-run-path"

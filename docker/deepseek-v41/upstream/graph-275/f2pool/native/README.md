@@ -1,6 +1,6 @@
 # DeepSeek TP4 with Pearl inside SGLang
 
-The four SM120 schedulers own the four CUDA contexts. Each scheduler loads the K780 Rust library and gives its mining thread the scheduler's existing context. Each idle thread replays a short 188-tile CUDA graph on a low-priority stream. A CPU broker closes admission to new mining slices and waits for the GPU completion event on each outstanding slice. After the last inference batch, all four ranks fence their streams and reopen the gate.
+The four SM120 schedulers own the four CUDA contexts. Each scheduler loads the K780 Rust library and gives its mining thread the scheduler's existing context. Each idle thread runs one CUDA graph at a time on a low-priority stream. The 3,008-tile default covers a 26,112-tile nonce in nine graphs. When inference arrives, the CPU broker stops new mining slices and waits for the outstanding graph on each GPU. After the last inference batch, all four ranks fence their streams and reopen the gate.
 
 In `joined` mode, layer zero's `attn.wo_b` computes both the projection consumed by DeepSeek and Pearl transcripts. This code runs inside the full DSPARK decode graph and eligible prefill calls. Direct and inference work have separate F2Pool connections. An independent local verifier checks a winning inference witness before forwarding it. That witness contains small numerical samples from the request. The owner enabled these submissions for the production endpoint.
 
@@ -15,6 +15,8 @@ cat "$runtime/native-production/current/ready.json"
 ```
 
 Use `set-mode joined` in the same command to restore inference mining. The selection persists across service restarts.
+
+The `tiles` field in the owner-only `native-production/config.json` sets the maximum size of a mining slice. The service reads it at startup. For a fresh installation, `native_host.py prepare --slice-tiles N` sets the value while staging the release. Use 188 to reproduce the original fast-handoff configuration. For offline reporting, a scrubbed session `config.json` containing only `tiles` is sufficient.
 
 ## Non-joined production results on November 24
 
@@ -43,7 +45,7 @@ The 92°C supervisor cutoff triggered three times in these long-context tests. J
 
 ## Native K780 calibration on November 24
 
-The four schedulers can report the selected miner build in the `slice_profile` field of the `native_rank` startup event. The `nonce-readback` build uses the same CUDA kernels and 188-tile slices as the original deployment. It copies the nonce signal and its Merkle root into pinned host memory once per nonce and reuses those 96 bytes for the remaining slices.
+The four schedulers can report the selected miner build in the `slice_profile` field of the `native_rank` startup event. The original `nonce-readback` comparison used the same CUDA kernels and 188-tile slices in both arms. The build copies the nonce signal and its Merkle root into pinned host memory once per nonce and reuses those 96 bytes for the remaining slices.
 
 The private miner revision `16d0056d220acc7ce922260baa4813d87274e512` builds this profile with `BPM_SLICE_PROFILE=nonce-readback`. The staged library SHA-256 is `95e160cc8a794ec411818dff0edeecdbb91ac242636504a687be992632bb5299`. On the canonical non-joined deployment, matched 210-second paid intervals measured 1,180.00 TMAC/s before and 1,180.99 after. F2Pool acknowledged shares on every rank, with 60 accepts before and 42 after and zero rejects in either interval. The throughput figures use completed tiles. These short intervals provide limited precision for a payout estimate.
 

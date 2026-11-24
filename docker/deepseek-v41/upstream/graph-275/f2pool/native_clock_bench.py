@@ -16,7 +16,7 @@ from native_bench import measure
 from native_check import logs, rows
 from native_mode_bench import cool_between_trials, metrics
 from native_mode_report import embedded_points
-from native_report import timings
+from native_report import configured_slice_tiles, timings
 from native_service import BASE, RELEASE
 from throughput import write
 from workload import graph
@@ -140,6 +140,7 @@ def request_row(index, notes, position, history, expected):
 
 def finish(run, requests, history, want):
     last = requests[-1]["end_ns"]
+    slice_tiles = configured_slice_tiles(run / "config.json")
     offsets = [[dict(elapsed=t) for t in (0, 30, 60, 90)] for _ in range(4)]
     deadline = time.monotonic() + 360
     while time.monotonic() < deadline:
@@ -149,7 +150,7 @@ def finish(run, requests, history, want):
         events = logs(run)
         broker = rows(run / "broker.jsonl")
         try:
-            mining_epoch, aligned = embedded_points(events, broker, offsets, last, 12)
+            mining_epoch, aligned = embedded_points(events, broker, offsets, last, 12, slice_tiles=slice_tiles)
         except ValueError:
             continue
         first = min(p[0]["elapsed"] for p in aligned)*1e9

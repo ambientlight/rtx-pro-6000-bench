@@ -7,6 +7,7 @@ import sys
 import time
 
 import fullmodel as host
+from native_report import configured_slice_tiles, slice_graph_count
 from workload import graph
 from throughput import write
 
@@ -44,7 +45,9 @@ def ready():
     data = logs()
     if any(e["event"] == "native_error" for events in data.values() for e in events):
         raise RuntimeError("A native rank reported an error")
-    return (len(data)==4 and all(any(e["event"]=="native_work" and e["graphs"]>=139 for e in events)
+    config = Path(host.NATIVE_CONFIG) if host.NATIVE_CONFIG else RUN / "config.json"
+    expected_graphs = slice_graph_count(configured_slice_tiles(config))
+    return (len(data)==4 and all(any(e["event"]=="native_work" and e["graphs"]>=expected_graphs for e in events)
                                 for events in data.values()) and json.loads(GATEWAY.read_text())["authorized_clients"]==4)
 
 

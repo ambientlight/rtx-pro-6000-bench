@@ -10,10 +10,12 @@ import subprocess
 
 import fullmodel as host
 from gateway import HOST, PORT, PREFLIGHT, VERIFIER_SHA, secret
+from native_report import TILES_PER_NONCE
 
 FILES = ("srt/pearl_runtime.py", "srt/pearl_native_idle.py", "srt/managers/scheduler.py")
 BASE_SGLANG = "a384e33a52d7bac3e7fac1b0ad24ce9bd4a9f4da"
 MODEL = Path("/mnt/hot/ambientlight/models/DeepSeek-V4.1-Flash-1017")
+DEFAULT_SLICE_TILES = 3008
 VERIFIER = Path("/mnt/hot/ambientlight/repos/mining/blackwell_pearl_miner-sglang-prototype/target/cargo/release/examples/verify_receipt")
 
 
@@ -21,7 +23,9 @@ def digest(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def prepare(source, library):
+def prepare(source, library, *, slice_tiles=DEFAULT_SLICE_TILES):
+    if not 1 <= slice_tiles <= TILES_PER_NONCE:
+        raise ValueError(f"K780 slice size must be between 1 and {TILES_PER_NONCE} tiles")
     host.check_artifacts()
     os.umask(0o077)
     source = source.resolve()
@@ -47,7 +51,7 @@ def prepare(source, library):
     with cfg.open("x") as out:
         json.dump(dict(library=str(run/"libpearl_idle.so"),permit=str(host.SOCKET.with_name("idle.permit")),
                        endpoint=f"{HOST}:{PORT}",account=json.loads(secret(PREFLIGHT))["f2pool_mining_account"],
-                       worker_prefix="sglnative",log_dir=str(run/"logs"),tiles=188,power_w=275,cutoff_c=host.GPU_TEMP_CUTOFF_C),out)
+                       worker_prefix="sglnative",log_dir=str(run/"logs"),tiles=slice_tiles,power_w=275,cutoff_c=host.GPU_TEMP_CUTOFF_C),out)
     (run/"staged.json").write_text(json.dumps(dict(library_sha256=digest(run/"libpearl_idle.so"),
         source={rel:digest(run/"pkg/sglang"/rel) for rel in FILES}),indent=2)+"\n")
 
@@ -67,11 +71,13 @@ if __name__ == "__main__":
     prep = cmd.add_parser("prepare")
     prep.add_argument("--source", required=True, type=Path)
     prep.add_argument("--library", required=True, type=Path)
+    prep.add_argument("--slice-tiles", type=int, default=DEFAULT_SLICE_TILES,
+                      help="Maximum K780 tiles per idle CUDA graph (default %(default)s)")
     cmd.add_parser("gateway")
     args=cli.parse_args()
     if not host.NATIVE_CONFIG or not Path(host.NATIVE_CONFIG).is_absolute():
         cli.error("Set PEARL_NATIVE_IDLE_CONFIG to the absolute private config path")
     if args.command == "prepare":
-        prepare(args.source, args.library)
+        prepare(args.source, args.library, slice_tiles=args.slice_tiles)
     else:
         gateway()

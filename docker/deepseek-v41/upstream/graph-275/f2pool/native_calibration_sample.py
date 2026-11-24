@@ -7,7 +7,7 @@ from pathlib import Path
 
 from native_check import logs, rows
 from native_mode_report import embedded_points, mining_result
-from native_report import RANKS, timings
+from native_report import RANKS, configured_slice_tiles, timings
 from throughput import write
 
 
@@ -28,7 +28,8 @@ def sample(run, requests, telemetry, seconds=120, warm=20):
     events = logs(run)
     broker = rows(run / "broker.jsonl")
     offsets = [[dict(elapsed=t) for t in range(0, seconds + 1, 30)] for _ in RANKS]
-    epoch, points = embedded_points(events, broker, offsets, max(r["end_ns"] for r in requests), warm)
+    slice_tiles = configured_slice_tiles(run / "config.json")
+    epoch, points = embedded_points(events, broker, offsets, max(r["end_ns"] for r in requests), warm, slice_tiles=slice_tiles)
     window = mining_result(points, gpu)
     for label, accepted in (("accepted", True), ("rejected", False)):
         window[label] = [
@@ -41,7 +42,7 @@ def sample(run, requests, telemetry, seconds=120, warm=20):
     if any(metric["n"] != len(requests) for metric in handoff.values()):
         raise ValueError("Expected a complete cut-in and resumption for every timed request")
     startup = [next(e for e in events[rank] if e["event"] == "native_rank") for rank in RANKS]
-    return dict(run=run.name, epoch=epoch, window=window, handoff=handoff,
+    return dict(run=run.name, epoch=epoch, slice_tiles=slice_tiles, window=window, handoff=handoff,
                 profiles=[e.get("slice_profile", "unreported") for e in startup])
 
 
