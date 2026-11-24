@@ -159,6 +159,29 @@ def prepare():
             and all(read_json(m.STATE/name)=={'status':'passed'} for name in m.SMOKES))
 
 
+def responses_smoke():
+    payload = dict(model="deepseek-v4-flash", stream=True, store=False, temperature=0,
+                   input=[dict(role="user",content="What is 19 + 23? Reply only with the number.")],
+                   max_output_tokens=96, chat_template_kwargs={"thinking":False})
+    req = urllib.request.Request(f"http://127.0.0.1:{INTERNAL_PORT}/v1/responses",
+            data=json.dumps(payload).encode(), headers={"Content-Type":"application/json"})
+    text = []
+    usage = {}
+    with urllib.request.urlopen(req,timeout=60) as stream:
+        for line in stream:
+            if not line.startswith(b"data:") or line[5:].strip()==b"[DONE]":
+                continue
+            event = json.loads(line[5:])
+            if event.get("type") == "response.output_text.delta":
+                text.append(event["delta"])
+            if event.get("type") == "response.completed":
+                usage = event["response"]["usage"]
+    if "".join(text).strip().rstrip(".") != "42" or not usage.get("output_tokens"):
+        raise RuntimeError("Direct streaming Responses readiness check failed")
+    m.write("responses-smoke.json",dict(status="passed",stream=True,store=False,
+            input_tokens=usage["input_tokens"],output_tokens=usage["output_tokens"]))
+
+
 def open_hour():
     if (m.STATE/'window.json').exists():
         raise RuntimeError('The measurement window is already recorded')
@@ -169,6 +192,7 @@ def open_hour():
                 info['cuda_graph_config']['decode']['backend'],info['cuda_graph_config']['prefill']['backend']) != (
                 4,4,'DSPARK','deepseek-v4-flash','full','disabled'):
             raise RuntimeError('Unexpected effective serving or capture profile')
+        responses_smoke()
         if not m.active(METRICS):
             m.unit(METRICS, m.PYTHON,DIR/'hour_metrics.py','collect','--run-dir',m.RUN,
                     '--port',str(INTERNAL_PORT),'--key-file',m.STATE/'api-key','--shape-dir',m.STATE/'shapes',

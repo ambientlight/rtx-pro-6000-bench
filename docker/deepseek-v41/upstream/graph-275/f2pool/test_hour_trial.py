@@ -96,9 +96,11 @@ class TrialTest(unittest.TestCase):
                       cuda_graph_config={'decode':{'backend':'full'},'prefill':{'backend':'disabled'}})
             stack.enter_context(patch.object(trial,'public_get',side_effect=lambda port,path:
                 json.dumps(info if path=='/server_info' else {'data':[{'id':'deepseek-v4-flash'}]}).encode()))
+            smoke=stack.enter_context(patch.object(trial,'responses_smoke'))
             launch=stack.enter_context(patch.object(trial.m,'unit'))
             timer=stack.enter_context(patch.object(trial,'recovery_timer'))
             trial.open_hour()
+            smoke.assert_called_once_with()
             window=trial.read_json(state/'window.json')
             self.assertEqual(window['end_monotonic_ns']-window['start_monotonic_ns'],3_600_000_000_000)
             self.assertEqual(window['active_workers'],4)
