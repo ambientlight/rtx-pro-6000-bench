@@ -13,13 +13,51 @@ __device__ __forceinline__ void mma(int (&acc)[4], const unsigned (&a)[4], const
                  : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "r"(b[0]), "r"(b[1]));
 }
 
+// The plain path uses the same signed tensor-core arithmetic and fragment
+// layout. Predicated loads cover partial tiles, including a single real row.
+template<int Warps>
+__device__ __forceinline__ void plain_tile(const unsigned* a, const unsigned* bt, int* out, int m, int n) {
+    const int warp = threadIdx.x / 32, lane = threadIdx.x % 32;
+    const int group = lane / 4, sub = lane % 4;
+    const int row0 = blockIdx.y * 16 + group, col0 = 8 * (blockIdx.x * Warps + warp);
+    const int b_row = col0 + group;
+    int product[4] = {};
+
+    for (int k = 0; k < kDim / 4; k += 8) {
+        unsigned af[4], bf[2];
+        #pragma unroll
+        for (int h = 0; h < 2; ++h) {
+            const int offset = k + 4 * h + sub;
+            bf[h] = b_row < n ? bt[b_row * (kDim / 4) + offset] : 0;
+            #pragma unroll
+            for (int r = 0; r < 2; ++r) {
+                const int row = row0 + 8 * r;
+                af[2 * h + r] = row < m ? a[row * (kDim / 4) + offset] : 0;
+            }
+        }
+        mma(product, af, bf);
+    }
+    #pragma unroll
+    for (int i = 0; i < 4; ++i) {
+        const int row = row0 + 8 * (i / 2), col = col0 + 2 * sub + i % 2;
+        if (row < m && col < n) out[row * n + col] = product[i];
+    }
+}
+
 // One warp computes 16 rows by 8 output columns. All of the tensor-core
 // accumulators feed both the checkpoint reductions and the corrected result.
-template<bool Compact>
+template<bool Compact, bool Gated = false>
 __global__ void projection(const unsigned* a, const unsigned* bt, const unsigned* na,
                            const unsigned* nb, int* out, unsigned* transcript,
-                           int m, int n) {
+                           int m, int n, const unsigned char* enabled = nullptr) {
     constexpr int warps = Compact ? 2 : 32;
+    if constexpr (Gated) {
+        // Every thread in a block sees the same replay-scoped device flag.
+        if (!*enabled) {
+            plain_tile<warps>(a, bt, out, m, n);
+            return;
+        }
+    }
     constexpr int tile_cols = 8 * warps;
     __shared__ unsigned partial[Compact ? 128 : 1024];
     const int warp = threadIdx.x / 32, lane = threadIdx.x % 32;
@@ -88,35 +126,9 @@ __global__ void projection(const unsigned* a, const unsigned* bt, const unsigned
         if (row < m) out[row * n + col] = product[i] - correction[i];
     }
 }
-// The plain path uses the same signed tensor-core arithmetic and fragment
-// layout. Predicated loads cover partial tiles, including a single real row.
 template<int Warps>
 __global__ void plain_projection(const unsigned* a, const unsigned* bt, int* out, int m, int n) {
-    const int warp = threadIdx.x / 32, lane = threadIdx.x % 32;
-    const int group = lane / 4, sub = lane % 4;
-    const int row0 = blockIdx.y * 16 + group, col0 = 8 * (blockIdx.x * Warps + warp);
-    const int b_row = col0 + group;
-    int product[4] = {};
-
-    for (int k = 0; k < kDim / 4; k += 8) {
-        unsigned af[4], bf[2];
-        #pragma unroll
-        for (int h = 0; h < 2; ++h) {
-            const int offset = k + 4 * h + sub;
-            bf[h] = b_row < n ? bt[b_row * (kDim / 4) + offset] : 0;
-            #pragma unroll
-            for (int r = 0; r < 2; ++r) {
-                const int row = row0 + 8 * r;
-                af[2 * h + r] = row < m ? a[row * (kDim / 4) + offset] : 0;
-            }
-        }
-        mma(product, af, bf);
-    }
-    #pragma unroll
-    for (int i = 0; i < 4; ++i) {
-        const int row = row0 + 8 * (i / 2), col = col0 + 2 * sub + i % 2;
-        if (row < m && col < n) out[row * n + col] = product[i];
-    }
+    plain_tile<Warps>(a, bt, out, m, n);
 }
 } // namespace
 
@@ -158,5 +170,18 @@ extern "C" cudaError_t pearl_wo_b_i7_plain(const int8_t* a, const int8_t* bt, in
         plain_projection<1><<<dim3((n + 7) / 8, 1), 32, 0, stream>>>(av, bv, out, m, n);
     else
         plain_projection<4><<<dim3((n + 31) / 32, (m + 15) / 16), 128, 0, stream>>>(av, bv, out, m, n);
+    return cudaGetLastError();
+}
+
+// Fixed compact TP4 target-verify shapes from DSPARK; gating is uniform per device.
+extern "C" cudaError_t pearl_wo_b_i7_graph(const int8_t* a, const int8_t* bt,
+        const int8_t* na, const int8_t* nb, int32_t* out, uint32_t* words,
+        const uint8_t* enabled, int m, int n, cudaStream_t stream) {
+    if (!enabled || !a || !bt || !na || !nb || !out || !words ||
+        m < 2 || m > 48 || m % 2 || n != 5120) return cudaErrorInvalidValue;
+    projection<true,true><<<dim3(n / 16, (m + 15) / 16), 64, 0, stream>>>(
+        reinterpret_cast<const unsigned*>(a), reinterpret_cast<const unsigned*>(bt),
+        reinterpret_cast<const unsigned*>(na), reinterpret_cast<const unsigned*>(nb),
+        out, words, m, n, enabled);
     return cudaGetLastError();
 }

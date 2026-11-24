@@ -17,7 +17,8 @@ __device__ auto digest(const uint32_t* src) {
     return cv;
 }
 
-__global__ void leaves(const uint32_t* input, const uint32_t* key, uint32_t* layer, int count) {
+__global__ void leaves(const uint32_t* input, const uint32_t* key, uint32_t* layer, int count, const uint8_t* enabled) {
+    if (enabled && !*enabled) return;
     const int leaf = blockIdx.x * blockDim.x + threadIdx.x;
     if (leaf >= count) return;
     auto cv = digest(key);
@@ -34,7 +35,8 @@ __global__ void leaves(const uint32_t* input, const uint32_t* key, uint32_t* lay
     for (int i = 0; i < 8; ++i) layer[leaf * 8 + i] = cv(i);
 }
 
-__global__ void parents(const uint32_t* layer, const uint32_t* key, uint32_t* next, int count) {
+__global__ void parents(const uint32_t* layer, const uint32_t* key, uint32_t* next, int count, const uint8_t* enabled) {
+    if (enabled && !*enabled) return;
     const int parent = blockIdx.x * blockDim.x + threadIdx.x;
     if (parent >= (count + 1) / 2) return;
     const uint32_t* children = layer + parent * 16;
@@ -54,7 +56,8 @@ __global__ void parents(const uint32_t* layer, const uint32_t* key, uint32_t* ne
 }
 
 // One keyed hash supplies 32 basis components or 8 permutation pairs.
-__global__ void noise_factors(const uint32_t* seed, uint32_t* basis, uint16_t* pairs, int dense_hashes) {
+__global__ void noise_factors(const uint32_t* seed, uint32_t* basis, uint16_t* pairs, int dense_hashes, const uint8_t* enabled) {
+    if (enabled && !*enabled) return;
     const int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= dense_hashes + k / 8) return;
     const bool dense = tid < dense_hashes;
@@ -79,7 +82,8 @@ __global__ void noise_factors(const uint32_t* seed, uint32_t* basis, uint16_t* p
     }
 }
 
-__global__ void expand(const uint32_t* basis, const uint16_t* pairs, uint32_t* noise) {
+__global__ void expand(const uint32_t* basis, const uint16_t* pairs, uint32_t* noise, const uint8_t* enabled) {
+    if (enabled && !*enabled) return;
     __shared__ uint32_t row[noise_rank / 4];
     int tid = threadIdx.x;
     if (tid < noise_rank / 4) row[tid] = basis[blockIdx.x * (noise_rank / 4) + tid];
@@ -96,6 +100,11 @@ __global__ void expand(const uint32_t* basis, const uint16_t* pairs, uint32_t* n
     }
 }
 
+using Commit = pearl::CommitmentHashFromMerkleRootsKernel;
+__global__ void commit_if_enabled(Commit::Params args, const uint8_t* enabled) {
+    if (!enabled || *enabled) Commit{}(args, nullptr);
+}
+
 size_t tree_bytes(int m) {
     size_t size = 0;
     // Root is returned separately to the caller.
@@ -110,9 +119,9 @@ extern "C" size_t pearl_activation_scratch(int m) {
     return m > 0 && m <= max_rows ? tree_bytes(m) + noise_rank * size_t(m) + 2 * k + 32 : 0;
 }
 
-extern "C" int pearl_activation_prepare(const void* a, const void* key, const void* root_b,
+extern "C" int pearl_activation_prepare_graph(const void* a, const void* key, const void* root_b,
         void* root_a, void* seed_a, void* noise, void* scratch, size_t bytes,
-        int m, int n, cudaStream_t stream) {
+        int m, int n, cudaStream_t stream, const uint8_t* enabled) {
     if (!a || !key || !root_b || !root_a || !seed_a || !noise || !scratch ||
         m <= 0 || m > max_rows || n <= 0 || bytes < pearl_activation_scratch(m)) return cudaErrorInvalidValue;
     uintptr_t pointers = uintptr_t(a) | uintptr_t(key) | uintptr_t(root_b) | uintptr_t(root_a) |
@@ -121,11 +130,11 @@ extern "C" int pearl_activation_prepare(const void* a, const void* key, const vo
     int count = 2 * m;
     auto layer = static_cast<uint32_t*>(scratch);
     auto job_key = static_cast<const uint32_t*>(key);
-    leaves<<<(count + 31) / 32, 32, 0, stream>>>(static_cast<const uint32_t*>(a), job_key, layer, count);
+    leaves<<<(count + 31) / 32, 32, 0, stream>>>(static_cast<const uint32_t*>(a), job_key, layer, count, enabled);
     while (count > 1) {
         auto next = count == 2 ? static_cast<uint32_t*>(root_a) : layer + count * 8;
         int next_count = (count + 1) / 2;
-        parents<<<(next_count + 63) / 64, 64, 0, stream>>>(layer, job_key, next, count);
+        parents<<<(next_count + 63) / 64, 64, 0, stream>>>(layer, job_key, next, count, enabled);
         layer = next;
         count = next_count;
     }
@@ -136,10 +145,17 @@ extern "C" int pearl_activation_prepare(const void* a, const void* key, const vo
     Commit::Arguments args{static_cast<const uint8_t*>(root_a), static_cast<const uint8_t*>(root_b),
         static_cast<const uint8_t*>(key), static_cast<uint8_t*>(seed_a), seed_b, nullptr, nullptr,
         true, uint32_t(m), uint32_t(n)};
-    cutlass::device_kernel<Commit><<<1, 1, 0, stream>>>(Commit::to_underlying_arguments(args));
+    commit_if_enabled<<<1, 1, 0, stream>>>(Commit::to_underlying_arguments(args), enabled);
     int dense_hashes = m * (noise_rank / 32);
     noise_factors<<<(dense_hashes + k / 8 + 63) / 64, 64, 0, stream>>>(
-        static_cast<const uint32_t*>(seed_a), basis, pairs, dense_hashes);
-    expand<<<m, 256, 0, stream>>>(basis, pairs, static_cast<uint32_t*>(noise));
+        static_cast<const uint32_t*>(seed_a), basis, pairs, dense_hashes, enabled);
+    expand<<<m, 256, 0, stream>>>(basis, pairs, static_cast<uint32_t*>(noise), enabled);
     return cudaGetLastError();
+}
+
+extern "C" int pearl_activation_prepare(const void* a, const void* key, const void* root_b,
+        void* root_a, void* seed_a, void* noise, void* scratch, size_t bytes,
+        int m, int n, cudaStream_t stream) {
+    return pearl_activation_prepare_graph(a, key, root_b, root_a, seed_a, noise, scratch,
+                                          bytes, m, n, stream, nullptr);
 }

@@ -6,6 +6,7 @@ accumulators in the local projection. Collect tickets against an artificial job.
 """
 import contextlib
 import ctypes as C
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 import functools
 import json
@@ -129,6 +130,9 @@ class Projection:
         self._layouts = {}
         self._proof_slots = threading.BoundedSemaphore(2)
         self.busy_skips = 0
+        self.eager_counts = {} if os.environ.get("PEARL_GRAPH_VERIFY") == "1" else None
+        self.eager_verify = {}
+        self.eager_verify_lock = threading.Lock()
         self._proofs = ThreadPoolExecutor(max_workers=1, thread_name_prefix="pearl-public-proof")
         self._torch_scale = self._proof_stream = None
 
@@ -187,8 +191,18 @@ class Projection:
     def _finish_proof(self, future, phase):
         try:
             result = future.result()
+            if self.eager_counts is not None and phase != "decode_graph":
+                with self.eager_verify_lock:
+                    counts = self.eager_verify.setdefault(phase, Counter())
+                    counts["verified_steps"] += 1
+                    counts["tickets_scanned"] += result["tickets"]
+                    counts["winning_tickets"] += result["hits"]
+                    counts["verified_proofs"] += int(bool(result["verified_witness_bytes"]))
             print(json.dumps({"pearl_public_verified": result, "phase": phase}), flush=True)
         except Exception as exc:
+            if self.eager_counts is not None and phase != "decode_graph":
+                with self.eager_verify_lock:
+                    self.eager_verify.setdefault(phase, Counter())["verification_errors"] += 1
             print(json.dumps({"pearl_public_verification_failed": type(exc).__name__, "phase": phase}), flush=True)
         finally:
             self._proof_slots.release()
@@ -198,6 +212,12 @@ class Projection:
         out = torch.empty((len(q), N), dtype=torch.int32, device=q.device)
         self.op.launch_plain(q.data_ptr(), device_bt, out.data_ptr(), len(q), N, stream.cuda_stream)
         return (out.float() * scale * self._torch_scale).to(dtype)
+
+    def _count_eager(self, phase, path, rows):
+        if self.eager_counts is not None:
+            counts = self.eager_counts.setdefault(phase, Counter())
+            counts[path + "_calls"] += 1
+            counts[path + "_rows"] += rows
 
     def torch_forward(self, x, phase):
         import torch
@@ -219,6 +239,7 @@ class Projection:
             layout = self.pool_layouts.select(compact, stream)
             device_bt = self._device_weight(stream.cuda_stream)
             if layout is None:
+                self._count_eager(phase, "no_job", len(x))
                 return self._plain_output(q, device_bt, stream, scale, x.dtype)
             job, weight, noise_tensor = layout
             device_nb, bits = noise_tensor.data_ptr(), job.share_bits
@@ -229,6 +250,7 @@ class Projection:
             on_witness = self.on_witness
         if not self._proof_slots.acquire(blocking=False):
             self.busy_skips += 1
+            self._count_eager(phase, "backpressure", len(x))
             return self._plain_output(q, device_bt, stream, scale, x.dtype)
         ref = None
         submitted = False
@@ -260,6 +282,7 @@ class Projection:
             future = self._proofs.submit(self._verify_copy, ref, host, done, bits, phase, on_witness)
             ref, submitted = None, True
             future.add_done_callback(lambda f: self._finish_proof(f, phase))
+            self._count_eager(phase, "mined", len(x))
             return y
         finally:
             if not submitted:

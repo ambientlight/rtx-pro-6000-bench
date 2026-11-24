@@ -18,6 +18,12 @@ cudaError_t pearl_wo_b_i7(const int8_t* a, const int8_t* bt,
                           int32_t* output, uint32_t* transcripts,
                           int m, int n, int k, int compact, cudaStream_t stream);
 
+// Stable-address compact graph path. A device flag selects corrected noisy or plain integer output.
+cudaError_t pearl_wo_b_i7_graph(const int8_t* a, const int8_t* bt,
+                                const int8_t* noise_a, const int8_t* noise_bt,
+                                int32_t* output, uint32_t* transcripts, const uint8_t* enabled,
+                                int m, int n, cudaStream_t stream);
+
 // Plain per-rank INT7 result [m,n] = A[m,2048] times transpose(BT[n,2048]).
 // Any positive m and n are supported within the launch/index limits. No external
 // padding, noise, transcript storage, allocations, or synchronization.
