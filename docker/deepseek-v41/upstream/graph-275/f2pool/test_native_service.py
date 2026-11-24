@@ -11,6 +11,24 @@ from unittest.mock import Mock, patch
 import native_service as service
 
 
+class Installation(unittest.TestCase):
+    def test_install_enables_adaptive_clocks_with_serving(self):
+        with tempfile.TemporaryDirectory() as tmp, patch.object(service.Path, "home", return_value=Path(tmp)), \
+                patch.object(service.host, "run") as run:
+            service.install()
+            units = Path(tmp) / ".config/systemd/user"
+            assets = service.HERE.parent / "native/clock"
+            clock_unit = "dsv41-adaptive-clock.service"
+            self.assertEqual((units / clock_unit).read_bytes(), (assets / clock_unit).read_bytes())
+            controller = Path(tmp) / ".local/libexec/dsv41-watch-clock.py"
+            self.assertEqual(controller.read_bytes(), (assets / "watch_clock.py").read_bytes())
+            self.assertTrue((units / "dsv41-pearl-fallback.service").is_file())
+            self.assertEqual([c.args for c in run.call_args_list], [
+                ("systemctl", "--user", "daemon-reload"),
+                ("systemctl", "--user", "enable", "dsv41-pearl.service", clock_unit),
+            ])
+
+
 class ServingMode(unittest.TestCase):
     def test_supervisor_arms_and_runs_gateway_only_in_joined_mode(self):
         for mode in service.MODES:

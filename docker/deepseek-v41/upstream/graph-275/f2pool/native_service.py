@@ -247,7 +247,9 @@ def fallback():
 
 def install():
     directory = Path.home() / ".config/systemd/user"
-    directory.mkdir(parents=True, exist_ok=True)
+    clock_assets = HERE.parent / "native/clock"
+    clock_unit = clock_assets / "dsv41-adaptive-clock.service"
+    controller = Path.home() / ".local/libexec/dsv41-watch-clock.py"
     units = {UNIT: f"""[Unit]
 Description=DeepSeek TP4 with native Pearl mining
 OnFailure={UNIT}-fallback.service
@@ -278,13 +280,18 @@ ExecStart={host.PYTHON} {HERE} fallback
 UMask=0077
 TimeoutStartSec=18min
 """}
-    for name, body in units.items():
-        dst = directory / (name + ".service")
-        tmp = dst.with_suffix(".tmp")
-        tmp.write_text(body)
-        tmp.replace(dst)
+    files = [(controller, (clock_assets / "watch_clock.py").read_text(), 0o755),
+             (directory / clock_unit.name, clock_unit.read_text(), 0o644)]
+    files.extend((directory / (name + ".service"), body, 0o644) for name, body in units.items())
+    for dst, body, mode in files:
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=dst.parent) as staging:
+            tmp = Path(staging) / dst.name
+            tmp.write_text(body)
+            tmp.chmod(mode)
+            tmp.replace(dst)
     host.run("systemctl", "--user", "daemon-reload")
-    host.run("systemctl", "--user", "enable", UNIT + ".service")
+    host.run("systemctl", "--user", "enable", UNIT + ".service", clock_unit.name)
 
 
 if __name__ == "__main__":
