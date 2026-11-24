@@ -77,6 +77,8 @@ def summary(inference):
 
 
 def report(bench, run, out):
+    run = run.resolve(strict=True)
+
     def read(path):
         return json.loads(path.read_text())
     capture = read(bench/"standalone.json")
@@ -86,8 +88,9 @@ def report(bench, run, out):
     count = min(map(len,control))
     control = [p[:count] for p in control]
     with (bench/"gpu.csv").open() as stream:
+        complete_rows = csv.reader(line for line in stream if line.endswith("\n"))
         telemetry = [(datetime.strptime(row[0], "%Y/%m/%d %H:%M:%S.%f").timestamp(),int(row[1]),list(map(float,row[2:])))
-                     for row in csv.reader(stream) if len(row)==9]
+                     for row in complete_rows if len(row)==9]
     serving = read(bench/"non-joined.json")
     joined = read(bench/"joined.json")
     live = read(bench/"non-joined-live.json")
@@ -126,6 +129,10 @@ def report(bench, run, out):
                  inference={s["mode"]:summary(s) for s in (joined,serving)}, paired_prompts=len(joined["rows"]),
                  timing=timing, requests_for_timing=len(requests), audited_serving_intervals=len(parked),
                  direct_gpu_reentries_while_parked=0)
+    at_native_clocks = sum(rate*new["mean_sm_mhz"]/old["mean_sm_mhz"] for rate,old,new in
+        zip(standalone["rank_tmac_s"],standalone["samples_by_rank"],native["samples_by_rank"],strict=True))
+    stats["clock_scaled_standalone_tmac_s_estimate"] = at_native_clocks
+    stats["embedded_pct_clock_scaled_estimate"] = 100*native["total_tmac_s"]/at_native_clocks
     stats["non_joined_inference_sessions"] = sorted({row["session"] for row in serving["rows"]})
     stats["preconditioning"] = {row["size"]:row["preconditioning"] for row in serving["rows"] if row.get("preconditioning")}
     archived = read(Path(__file__).with_name("native")/"qualification.json")
@@ -134,6 +141,32 @@ def report(bench, run, out):
         for row in archived["historical"]]
     stats["six_second_comparison"] = dict(historical_tmac_s=historical["total_tmac_s"],historical_seconds=historical["seconds"],
         first_eligible_native_epoch=burst_epoch,embedded=early,embedded_pct_historical=100*early["total_tmac_s"]/historical["total_tmac_s"])
+    first_samples = {run.name:early["total_tmac_s"]}
+    stats["handoffs_by_session"] = {run.name:timing}
+    hot = bench/"hot-handoff.json"
+    if hot.exists():
+        post_idle = read(hot)
+        if post_idle["http"]!=200 or post_idle["start_ns"]<=embedded[0][-1]["elapsed"]*1e9:
+            raise ValueError("Expected a successful request after the measured idle interval")
+        stats["handoff_after_sustained_idle"] = timings([post_idle],broker,records)
+    thermal_stops = []
+    prior = [(m,run.parent/m) for m in stats["non_joined_inference_sessions"] if m!=run.name]
+    for name, directory in prior:
+        old_records, old_broker = logs(directory),lines(directory/"broker.jsonl")
+        sample_requests = [r for r in serving["rows"] if r["session"]==name]
+        stats["handoffs_by_session"][name] = timings(sample_requests,old_broker,old_records)
+        _, points = embedded_points(old_records,old_broker,calibration,last_request=0,warm=0)
+        first_samples[name] = mining_result(points,telemetry)["total_tmac_s"]
+    stats["six_second_comparison"]["first_tmac_s_by_session"] = first_samples
+    joined_path = bench/"joined-run-path"
+    sessions = [("non-joined",directory) for _,directory in prior]
+    if joined_path.exists():
+        sessions.append(("joined",Path(joined_path.read_text().strip())))
+    for mode,directory in sessions:
+        failure = directory/"failure.json"
+        if failure.exists() and read(failure)["reason"]=="GPU reached the 92 C cutoff":
+            thermal_stops.append(dict(mode=mode,session=directory.name,temperatures_c=read(directory/"temperature.json")["temperatures_c"]))
+    stats["thermal_stops"] = thermal_stops
     stats["activation"] = dict(run=live["run"], endpoint=live["endpoint"], port=live["port"], enabled=live["enabled"],
         smokes=live["fresh_smokes"], cuda_graph_config=serving["profile"]["cuda_graph_config"],
         stock_container=live["stock_container"], owners=len(live["ownership"]["gpu_processes"]),

@@ -16,7 +16,32 @@ cat "$runtime/native-production/current/ready.json"
 
 Use `set-mode joined` in the same command to restore inference mining. The selection persists across service restarts.
 
-## Serving and mining at 275 W per GPU
+## Non-joined production results on November 24
+
+The canonical Responses endpoint runs in non-joined mode. All four schedulers reported their borrowed CUDA context, the idle K780 library and a disabled Pearl inference operator. Each rank replayed the full DSPARK decode graph. All four startup smokes passed, and F2Pool acknowledged direct work from all four schedulers. [Measurement and activation evidence](non-joined-qualification.json)
+
+| Paid K780 on four GPUs at 275 W each | Sustained TMAC/s | Wall time | F2Pool accepted | Rejected | Peak GPU temperature |
+|---|---:|---:|---:|---:|---:|
+| Original standalone executable | 1,179.90 | 210.0 s | 64 | 0 | 90°C |
+| Native idle threads in SGLang | 1,181.24 | 210.2 s | 62 | 0 | 88°C |
+
+Both miners ran the K780 v1 kernel with K=65,536 and 188 tiles per slice against live jobs. The comparison uses completed MAC counters after a 60-second warmup and seven consecutive 30-second windows. The embedded rate was 100.11% of standalone. Both arms averaged 275 W on each card and their hardware and software thermal slowdown counters stayed flat during the measured mining windows. The first six-second idle samples on three non-joined launches ranged from 1,229.37 to 1,234.60 TMAC/s. The archived six-second standalone calibration measured 1,233.67 TMAC/s. [Matched mining measurements](non-joined-qualification.json) · [Original calibration](../../direct-calibration.json)
+
+| Uncached input tokens | Output | Non-joined first token | Non-joined server prefill tok/s | Non-joined client decode tok/s | Joined client decode tok/s in this run |
+|---|---:|---:|---:|---:|---:|
+| 1,354–1,359 | 256 | 0.172 s | 8,691 | 115.19 | 116.85 |
+| 9,418–9,424 | 256 | 0.963 s | 10,159 | 115.97 | 113.89 |
+| 32,779 | 8,192 | 3.309 s | 10,220 | 116.71 | 112.39 |
+| 131,387 | 512 | 13.583 s | 9,932 | 112.71 | 111.73 |
+| 200,305 | 512 | 21.351 s | 9,643 | 106.10 | Interrupted at cutoff |
+
+The short rows are medians of four requests each. Each long row is one completion with fresh sampling. Prefill uses the server's forward time. Decode uses the client stream after the first token. The ten completed pairs had identical prompt hashes, input lengths and output budgets. The previous separately hosted fast-switch miners recorded 112.78, 112.07 and 117.72 decode tok/s on the same three long prompts. [Serving measurements](non-joined-qualification.json) · [Historical runs](qualification.json)
+
+Over 40 requests the p99 from broker demand to all four miners parked was 1.93 ms. From eligibility to all four GPUs mining it was 0.37 ms. From the final streamed event to the first mining kernel it was 19.41 ms. An additional request immediately after sustained mining parked all four in 1.65 ms and returned to the first mining kernel 19.03 ms after the final event. [Handoff timings](non-joined-qualification.json)
+
+The 92°C supervisor cutoff triggered three times in these long-context tests. Joined serving stopped during the 200K prefill. Non-joined serving completed 200K and stopped during the following 131K prefill. A second non-joined run stopped about a second after the full 32K/8,192 response finished. The successful 131K and 32K samples used benchmark-only cooling intervals to 70°C between requests. All four miners had resumed before each timed request. The final active non-joined session passed the production and post-mining handoff checks. [Thermal readings and test conditions](non-joined-qualification.json)
+
+## Joined qualification at 275 W per GPU on November 23
 
 | Four-card operating mode | Measured mining rate | Fraction of previous standalone K780 |
 |---|---:|---:|
