@@ -33,6 +33,7 @@ SOCKET = Path(os.environ.get('XDG_RUNTIME_DIR', f'/run/user/{os.getuid()}')) / B
 SMOKES = ('smoke.json', 'smoke-structured.json', 'smoke-tools.json', 'smoke-vision.json')
 DOCKER = ('docker', '--context', 'shared-operator')
 PYTHON = '/usr/bin/python3'
+GPU_TEMP_CUTOFF_C = 92
 
 
 def run(*args, timeout=25):
@@ -111,7 +112,7 @@ def before_stop():
     processes = run('nvidia-smi','--query-compute-apps=process_name','--format=csv,noheader').splitlines()
     if any(Path(x.strip()).name == 'bpm' for x in processes):
         raise RuntimeError('A direct miner still owns a GPU')
-    if max(cards()) >= 92 or not state['container'].endswith(' running'):
+    if max(cards()) >= GPU_TEMP_CUTOFF_C or not state['container'].endswith(' running'):
         raise RuntimeError('Original state or temperatures unsuitable for cutover')
     return state
 
@@ -225,8 +226,8 @@ def guard():
             temps = cards()
             peak = max(temps)
             write('temperature.json', {'timestamp_ns':time.time_ns(), 'temperatures_c':temps, 'max_c':peak})
-            if peak >= 92:
-                raise RuntimeError('GPU temperature reached the 92 C cutoff')
+            if peak >= GPU_TEMP_CUTOFF_C:
+                raise RuntimeError(f'GPU temperature reached the {GPU_TEMP_CUTOFF_C} C cutoff')
         except Exception as error:
             try:
                 write('guard.json',dict(timestamp_ns=time.time_ns(),reason=str(error),

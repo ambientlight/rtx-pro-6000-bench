@@ -14,8 +14,10 @@ import fullmodel as m
 class FullModelTest(unittest.TestCase):
     def test_thermal_cutoff_starts_independent_restore(self):
         with tempfile.TemporaryDirectory() as directory, patch.object(m, 'STATE', Path(directory)):
-            with patch.object(m,'cards',return_value=[75,92,70,71]), patch.object(m,'run') as run:
+            with patch.object(m,'cards',side_effect=[[88,89,90,91], [75,92,70,71]]), \
+                 patch.object(m.time,'sleep') as sleep, patch.object(m,'run') as run:
                 m.guard()
+            sleep.assert_called_once_with(1)
             run.assert_called_once_with('systemctl','--user','start','--no-block',m.RESTORE+'.service')
             receipt=json.loads((Path(directory)/'guard.json').read_text())
             self.assertEqual(receipt['temperatures_c'], [75,92,70,71])

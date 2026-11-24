@@ -79,7 +79,7 @@ class WorkloadTest(unittest.TestCase):
             self.assertEqual(window.reason, "pool_accepted")
             self.assertFalse(arm.exists())
 
-    def test_guard_waits_through_warm_readings_and_stale_samples(self):
+    def test_stale_guard_readings_wait_and_warm_readings_admit_immediately(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp)/"temperature.json"
             def sample(temp, age_s=0):
@@ -87,13 +87,19 @@ class WorkloadTest(unittest.TestCase):
                             temperatures_c=[temp,75,82,70], max_c=temp)
             path.write_text(json.dumps(sample(91, age_s=6)))
             self.assertIsNone(w.temperature(path))
-            sequence = iter([sample(89), None, sample(87), sample(84)])
-            window = Namespace(done=threading.Event())
-            with patch.object(w, "temperature", side_effect=lambda _:next(sequence)), \
-                 patch.object(window.done, "wait", return_value=False):
-                cooling = w.wait_for_cooling(path, window)
-            self.assertEqual(cooling["peak_c"], 89)
-            self.assertGreater(cooling["paused_s"], 0)
+            window = Namespace(done=threading.Event(), reason=None)
+            with patch.object(w, "temperature", side_effect=[None, sample(91), sample(88), sample(92)]), \
+                 patch.object(window.done, "wait", return_value=False) as wait:
+                cooling = w.check_admission_temperature(path, window)
+                self.assertEqual(cooling["peak_c"], 91)
+                self.assertGreater(cooling["paused_s"], 0)
+                self.assertFalse(window.done.is_set())
+                self.assertEqual(w.check_admission_temperature(path, window), dict(peak_c=88, paused_s=0.))
+                self.assertFalse(window.done.is_set())
+                self.assertEqual(w.check_admission_temperature(path, window), dict(peak_c=92, paused_s=0.))
+                self.assertTrue(window.done.is_set())
+                self.assertEqual(window.reason, "temperature_cutoff")
+                wait.assert_called_once()
 
     def test_verified_wide_prefill_when_some_chunks_bypass_mining(self):
         before, after = ranks(0), ranks(1)

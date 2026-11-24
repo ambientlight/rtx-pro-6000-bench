@@ -11,6 +11,8 @@ import time
 import urllib.request
 from pathlib import Path
 
+from fullmodel import GPU_TEMP_CUTOFF_C
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "full-canary"))
 import graph_compare as graph
 from qualify import request
@@ -248,20 +250,19 @@ def temperature(path):
     return None
 
 
-def wait_for_cooling(path, window):
-    """A hard trip or missing guard cannot be bypassed by a fresh request."""
+def check_admission_temperature(path, window):
+    """Wait for a fresh guard sample and close the request window at the cutoff."""
     started = time.monotonic()
-    hot = paused = False
+    paused = False
     peak = None
     while not window.done.is_set():
         sample = temperature(path)
-        if sample:
-            current = sample["max_c"]
-            peak = current if peak is None else max(peak, current)
-            if current >= 88:
-                hot = True
-            if not hot or current <= 84:
-                break
+        if sample is not None:
+            peak = sample["max_c"]
+            if peak >= GPU_TEMP_CUTOFF_C:
+                window.reason = window.reason or "temperature_cutoff"
+                window.done.set()
+            break
         paused = True
         window.done.wait(.25)
     return dict(paused_s=time.monotonic() - started if paused else 0., peak_c=peak)
@@ -340,7 +341,7 @@ def run(args):
                         raise ValueError("Duplicate public prefill chunk")
                     request_hash = graph.token_hash(ids)
                     if args.temperature_file:
-                        cooling = wait_for_cooling(args.temperature_file, window)
+                        cooling = check_admission_temperature(args.temperature_file, window)
                         if cooling["peak_c"] is not None:
                             summary["peak_admission_c"] = max(summary["peak_admission_c"] or 0, cooling["peak_c"])
                         if cooling["paused_s"]:
@@ -467,7 +468,7 @@ def main():
         p.add_argument("--" + option, type=Path, required=True)
     p.add_argument("--seconds", type=int, required=True)
     p.add_argument("--temperature-file", type=Path,
-                   help="Guard temperature.json. Pause at 88 C, resume at 84 C; hold while samples are stale")
+                   help=f"Wait for a fresh guard sample before each request and end the run at {GPU_TEMP_CUTOFF_C} C")
     p.add_argument("--no-scan-seconds", type=int, default=120)
     p.add_argument("--max-requests", type=int, default=1_000_000)
     p.add_argument("--input-tokens", type=int, default=16_384)

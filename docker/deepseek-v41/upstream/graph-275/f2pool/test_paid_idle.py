@@ -1,11 +1,8 @@
-"""F2Pool worker attribution and thermal holds with CPU-only local sockets."""
+"""Offline checks for F2Pool worker attribution and prewarm admission."""
 import asyncio
-from contextlib import suppress
 import io
 import json
 import os
-from pathlib import Path
-import tempfile
 import unittest
 from unittest.mock import patch
 
@@ -57,42 +54,13 @@ class IdleTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn('privateaccount',journal.getvalue())
         self.assertNotIn('mock-public-synthetic',journal.getvalue())
 
-    async def test_thermal_interlock_independent_across_admissions(self):
-        # Model the worker's reference-counted HOLD sockets. This tests that the
-        # cooler owns exactly one such stream through hysteresis and releases only its own.
-        holds=set()
-        async def worker(rd,wr):
-            self.assertEqual(await rd.readline(),b'HOLD\n')
-            holds.add(wr)
-            wr.write(b'DRAINED\n')
-            await wr.drain()
-            self.assertEqual(await rd.readline(),b'RELEASE\n')
-            holds.remove(wr)
-            wr.write(b'RELEASED\n')
-            await wr.drain()
-            wr.close()
-        with tempfile.TemporaryDirectory() as d:
-            p=Path(d)/'worker'
-            async with await asyncio.start_unix_server(worker,path=p):
-                rd,wr=await asyncio.open_unix_connection(p)
-                wr.write(b'HOLD\n')
-                await wr.drain()
-                self.assertEqual(await rd.readline(),b'DRAINED\n')
-                cooler=idle.Cooler(p)
-                rank={}
-                for t in (88,87,85):
-                    await cooler.update(t,rank)
-                    self.assertTrue(rank['cooling'])
-                    self.assertEqual(len(holds),2)
-                await cooler.update(84,rank)
-                self.assertFalse(rank['cooling'])
-                self.assertEqual(len(holds),1)
-                wr.write(b'RELEASE\n')
-                await wr.drain()
-                self.assertEqual(await rd.readline(),b'RELEASED\n')
-                self.assertFalse(holds)
-                wr.close()
-                await wr.wait_closed()
+    def test_prewarm_accepts_warm_cards_until_any_card_reaches_92(self):
+        cards = [[str(i), f'GPU-{i}', '850', '275', str(88+i)] for i in range(4)]
+        with patch.object(idle, 'gpu_info', return_value=cards):
+            self.assertEqual(idle.prewarm_cards(), cards)
+            cards[2][4] = '92'
+            with self.assertRaisesRegex(RuntimeError, '92 C cutoff'):
+                idle.prewarm_cards()
 
 
 if __name__=='__main__':

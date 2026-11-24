@@ -14,6 +14,7 @@ import subprocess
 import sys
 import time
 
+from fullmodel import GPU_TEMP_CUTOFF_C
 from gateway import HOST, PORT, PREFLIGHT, MAX_FRAME, digest, frame, message, parse_job, secret
 
 HERE = Path(__file__).resolve()
@@ -34,6 +35,15 @@ def gpu_info():
     cards = [line.split(', ') for line in rows.splitlines()]
     if [int(c[0]) for c in cards] != list(range(4)) or any(float(c[3]) != 275 for c in cards):
         raise RuntimeError('Four cards at 275 W are required')
+    return cards
+
+
+def prewarm_cards():
+    cards = gpu_info()
+    if min(int(c[2]) for c in cards) < 850:
+        raise RuntimeError('Insufficient free memory for prewarm')
+    if max(int(c[4]) for c in cards) >= GPU_TEMP_CUTOFF_C:
+        raise RuntimeError(f'GPU temperature reached the {GPU_TEMP_CUTOFF_C} C cutoff before prewarm')
     return cards
 
 
@@ -63,6 +73,7 @@ class Relay:
         self.pid = None
         self.active = False
         self.tasks = set()
+        # Archived runs and the idle-rate collector use these cooling counters.
         self.state = dict(worker=f'joinedidle{rank}', connected=False, authorized=False, connections=0,
                           notifications=0, submitted=0, accepted=0, rejected=0, unknown=0,
                           accepted_work_macs=0., target=None, work=None, cooling=False, cooling_seconds=0.)
@@ -229,34 +240,6 @@ async def warm(broker,workers,relays):
             await asyncio.sleep(.03)
 
 
-class Cooler:
-    def __init__(self,path):
-        self.path=path
-        self.hold=None
-        self.began=0.
-        self.seconds=0.
-    async def update(self,temp,rank):
-        if temp>=88 and self.hold is None:
-            self.hold=await asyncio.open_unix_connection(self.path)
-            rd,wr=self.hold
-            wr.write(b'HOLD\n')
-            await wr.drain()
-            if await asyncio.wait_for(rd.readline(),6)!=b'DRAINED\n':
-                raise RuntimeError('Could not park hot worker')
-            self.began=time.monotonic()
-        elif temp<=84 and self.hold:
-            rd,wr=self.hold
-            wr.write(b'RELEASE\n')
-            await wr.drain()
-            if await asyncio.wait_for(rd.readline(),6)!=b'RELEASED\n':
-                raise RuntimeError('Thermal hold release failed')
-            self.seconds+=time.monotonic()-self.began
-            wr.close()
-            self.hold=None
-        rank.update(cooling=self.hold is not None,
-                    cooling_seconds=self.seconds+(time.monotonic()-self.began if self.hold else 0.))
-
-
 def read_work(stream, relay):
     while True:
         start=stream.tell()
@@ -277,9 +260,7 @@ async def serve(args):
     account=json.loads(secret(PREFLIGHT))['f2pool_mining_account']
     if not re.fullmatch(r'[A-Za-z0-9_-]{1,64}',account):
         raise ValueError('Malformed configured mining account')
-    cards=await asyncio.to_thread(gpu_info)
-    if min(int(c[2]) for c in cards)<850 or max(int(c[4]) for c in cards)>=88:
-        raise RuntimeError('Insufficient free memory or thermal margin for prewarm')
+    cards=await asyncio.to_thread(prewarm_cards)
     if subprocess.run(['systemctl','is-active','--quiet','pearl-f2pool']).returncode==0:
         raise RuntimeError('Existing paid supervisor is already running')
     ctl=args.socket.parent
@@ -304,7 +285,7 @@ async def serve(args):
                 proc=await asyncio.create_subprocess_exec(str(BINARY),'--pool',
                     f'127.0.0.1:{server.sockets[0].getsockname()[1]}','--wallet','localrank',
                     '--worker',r.state['worker'],'--variant','780','--k','65536','--kernel-variant','v1',
-                    '--slice-tiles','188','--power-limit','275','--max-temp','92','--device','0',
+                    '--slice-tiles','188','--power-limit','275','--max-temp',str(GPU_TEMP_CUTOFF_C),'--device','0',
                     '--control-socket',str(workers[i]),'--require-watch','--json','--log',str(log),
                     cwd=rankdir,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,
                     env={**os.environ,'CUDA_VISIBLE_DEVICES':cards[i][1],'RAYON_NUM_THREADS':'2'})
@@ -314,14 +295,12 @@ async def serve(args):
             children.append(await asyncio.create_subprocess_exec(sys.executable,str(PROTO/'broker.py'),
                 '--socket',str(args.socket),'--timeline',str(args.state/'broker-events.jsonl'),'--watch-workers',*cli))
             await warm(args.socket,workers,relays)
-            coolers=[Cooler(path) for path in workers]
             print('Four authenticated K780 workers are resident, watched and drained',flush=True)
             while True:
                 if any(p.returncode is not None for p in children):
                     raise RuntimeError(f'Idle fleet process exited: {[p.returncode for p in children]}')
                 cards=await asyncio.to_thread(gpu_info)
                 temps=[int(c[4]) for c in cards]
-                await asyncio.gather(*(c.update(t,r.state) for c,t,r in zip(coolers,temps,relays)))
                 broker,*stats=await asyncio.gather(*(rpc(p) for p in [args.socket,*workers]))
                 if any(s['faulted'] for s in stats):
                     raise RuntimeError('Lost watched worker hold')
