@@ -1,0 +1,752 @@
+diff --git a/build.rs b/build.rs
+index 1f86d29..5231bd2 100644
+--- a/build.rs
++++ b/build.rs
+@@ -107,6 +107,10 @@ fn main() {
+         args.extend(v.knobs.iter().map(|(k, val)| format!("-DK780_{k}={val}")));
+         units.push((format!("kernel780_v{i}"), "kernel780", args));
+     }
++    units.push(("kernel780_slice".into(), "kernel780", vec![
++        "-Xptxas".into(), "-O1".into(), "-DK780_NS=k780_sliced".into(),
++        "-DK780_LAUNCH=pm_k780_slice".into(), "-DBPM_SLICED=1".into(),
++    ]));
+     let jobs = std::thread::available_parallelism().map_or(4, |n| n.get());
+     for chunk in units.chunks(jobs) {
+         let children: Vec<_> = chunk
+diff --git a/kernels/kernel780.cu b/kernels/kernel780.cu
+index 884419a..9695125 100644
+--- a/kernels/kernel780.cu
++++ b/kernels/kernel780.cu
+@@ -137,6 +137,10 @@ struct Params {
+   const uint32_t *key, *target;
+   uint32_t *count, *ids;
+   int cap;
++#ifdef BPM_SLICED
++  int first_tile = 0, end_tile = 0;
++  uint32_t *started = nullptr;
++#endif
+ #if K780_BPANELS
+   const uint4 *b_fragments = nullptr;
+   int panel_first = 0, panel_count = 0;
+@@ -199,6 +203,12 @@ __global__ __launch_bounds__(NT, 1) void kernel(const __grid_constant__ Params p
+ __device__ __forceinline__ void body(const Params &p) {
+   extern __shared__ __align__(1024) uint8_t sm[];
+   const uint32_t tidv = threadIdx.x;
++#ifdef BPM_SLICED
++  // A mapped, naturally aligned host word. The controller polls this only on
++  // the first productive slice after a release, as an upper bound on GPU start.
++  if (p.started && blockIdx.x == 0 && tidv == 0)
++    asm volatile("st.release.sys.global.u32 [%0], %1;" :: "l"(p.started), "r"(1u) : "memory");
++#endif
+   const int lane = tidv & 31, warp = tidv >> 5, wr = warp / (BN / WN), wc = warp % (BN / WN);
+   const Selector *pbase = p.pairs;
+ #if K780_BPANELS
+@@ -249,7 +259,11 @@ __device__ __forceinline__ void body(const Params &p) {
+     if constexpr (!K780_BPANELS)
+       asm volatile("cp.async.bulk.shared::cta.global.mbarrier::complete_tx::bytes [%0], [%1], %2, [%3];" ::"r"(sa(sm + OFF_BB)), "l"(p.basB + size_t(col_ / 16) * 2048), "r"(BASB), "r"(bar) : "memory");
+   };
++#ifdef BPM_SLICED
++  for (int tile = p.first_tile + blockIdx.x; tile < p.end_tile; tile += gridDim.x) {
++#else
+   for (int tile = blockIdx.x; tile < tiles; tile += gridDim.x) {
++#endif
+     const int bm = tile_m(tile), bn = first_panel + tile_n(tile), row = bm * BM;
+     auto product = [&](int32_t *c, const uint32_t *a, const uint32_t *b) {
+ #if K780_DP4A_WARPS
+@@ -715,7 +729,11 @@ __global__ __launch_bounds__(128) void reorder_pairs(Pair *pairs, int k
+ // Packed basis (pack_basis_frag) for A and B, packed pair indices for A and B.
+ // Covers the first M/160*160 rows; the nonce row is never sampled.
+ PM_API int K780_LAUNCH(const void *basA, const void *basB, const void *ia, const void *ib, int m, int n, int k,
+-                              const void *key, const void *target, void *count, void *ids, int cap, void *stream) {
++                              const void *key, const void *target, void *count, void *ids, int cap,
++#ifdef BPM_SLICED
++                              int first_tile, int end_tile, uint32_t *started,
++#endif
++                              void *stream) {
+   using namespace K780_NS;
+   if (m % 16 || n % BN || k % 128 || k < 256 || k > 65536) return cudaErrorInvalidValue;
+   Pair *pairs = nullptr;
+@@ -735,6 +753,10 @@ PM_API int K780_LAUNCH(const void *basA, const void *basB, const void *ia, const
+   e = cudaGetSymbolAddress((void **)&zero, g_zero);
+   if (e) return e;
+   auto s = (cudaStream_t)stream;
++#ifdef BPM_SLICED
++  if (first_tile < 0 || first_tile >= end_tile || end_tile > (m / BM) * (n / BN)) return cudaErrorInvalidValue;
++  if (first_tile == 0) {
++#endif
+ #if !K780_FUSE_PAIRS
+   build_pairs<<<(k + 255) / 256, 256, 0, s>>>((const uint32_t *)ia, (const uint32_t *)ib, pairs, k);
+   e = cudaGetLastError();
+@@ -750,9 +772,17 @@ PM_API int K780_LAUNCH(const void *basA, const void *basB, const void *ia, const
+   );
+   e = cudaGetLastError();
+   if (e) return e;
++#ifdef BPM_SLICED
++  }
++#endif
+   const int mm = m / BM * BM;
+   Params p{(const uint8_t *)basA, (const uint8_t *)basB, selectors, zero, mm, n, k,
+            (const uint32_t *)key, (const uint32_t *)target, (uint32_t *)count, (uint32_t *)ids, cap};
++#ifdef BPM_SLICED
++  p.first_tile = first_tile;
++  p.end_tile = end_tile;
++  p.started = started;
++#endif
+   int dev = 0, sms = 0;
+   cudaGetDevice(&dev);
+   e = cudaDeviceGetAttribute(&sms, cudaDevAttrMultiProcessorCount, dev);
+diff --git a/src/cuda.rs b/src/cuda.rs
+index 9d4aaf9..3baca85 100644
+--- a/src/cuda.rs
++++ b/src/cuda.rs
+@@ -32,11 +32,13 @@ extern "C" {
+     fn cuDeviceGetAttribute(v: *mut c_int, attr: c_int, dev: CUdevice) -> CUresult;
+     fn cuDevicePrimaryCtxRetain(ctx: *mut CUcontext, dev: CUdevice) -> CUresult;
+     fn cuCtxSetCurrent(ctx: CUcontext) -> CUresult;
++    fn cuCtxSynchronize() -> CUresult;
+     fn cuGetErrorString(err: CUresult, s: *mut *const c_char) -> CUresult;
+     fn cuMemAlloc_v2(p: *mut CUdeviceptr, bytes: usize) -> CUresult;
+     fn cuMemFree_v2(p: CUdeviceptr) -> CUresult;
+     fn cuMemGetInfo_v2(free: *mut usize, total: *mut usize) -> CUresult;
+     fn cuMemHostAlloc(p: *mut *mut c_void, bytes: usize, flags: c_uint) -> CUresult;
++    fn cuMemHostGetDevicePointer_v2(d: *mut CUdeviceptr, p: *mut c_void, flags: c_uint) -> CUresult;
+     fn cuMemFreeHost(p: *mut c_void) -> CUresult;
+     fn cuMemsetD8_v2(p: CUdeviceptr, v: u8, n: usize) -> CUresult;
+     fn cuMemsetD8Async(p: CUdeviceptr, v: u8, n: usize, s: CUstream) -> CUresult;
+@@ -71,6 +73,11 @@ pub fn check(rc: CUresult, what: &str) -> Result<()> {
+     bail!("CUDA {what} failed: {text} ({rc})")
+ }
+ 
++/// Cold initialization can issue default-stream work before the dedicated mining stream exists.
++pub fn synchronize_context() -> Result<()> {
++    check(unsafe { cuCtxSynchronize() }, "cuCtxSynchronize")
++}
++
+ /// Kernel launcher return code: cudaError_t from the CUDA runtime inside a kernel library.
+ pub fn check_kernel(rc: c_int, what: &str) -> Result<()> {
+     if rc != 0 {
+@@ -194,6 +201,32 @@ impl Drop for HostBuf {
+     }
+ }
+ 
++/// Four aligned bytes of pinned CPU memory mapped for GPU system-scope stores.
++pub struct StartFlag {
++    host: *mut std::sync::atomic::AtomicU32,
++    pub device: CUdeviceptr,
++}
++impl StartFlag {
++    pub fn new() -> Result<Self> {
++        let mut host = std::ptr::null_mut();
++        let mut device = 0;
++        unsafe {
++            check(cuMemHostAlloc(&mut host, 4, 2), "cuMemHostAlloc(DEVICEMAP)")?;
++            if let Err(error) = check(cuMemHostGetDevicePointer_v2(&mut device, host, 0), "map GPU start flag") {
++                cuMemFreeHost(host);
++                return Err(error);
++            }
++            host.cast::<std::sync::atomic::AtomicU32>().write(std::sync::atomic::AtomicU32::new(0));
++        }
++        Ok(Self { host: host.cast(), device })
++    }
++    pub fn clear(&self) { unsafe { &*self.host }.store(0, std::sync::atomic::Ordering::SeqCst); }
++    pub fn seen(&self) -> bool { unsafe { &*self.host }.load(std::sync::atomic::Ordering::Acquire) != 0 }
++}
++impl Drop for StartFlag {
++    fn drop(&mut self) { unsafe { cuMemFreeHost(self.host.cast()) }; }
++}
++
+ pub struct Stream(pub CUstream);
+ unsafe impl Send for Stream {}
+ impl Stream {
+diff --git a/src/engine.rs b/src/engine.rs
+index 9aab072..0a7bb86 100644
+--- a/src/engine.rs
++++ b/src/engine.rs
+@@ -27,6 +27,7 @@ struct Slot {
+ }
+ 
+ pub struct Snapshot {
++    pub start_seen_ns: u64,
+     pub sequence: u64,
+     pub groups: Vec<u32>,
+     pub overflow: u32,
+@@ -50,6 +51,7 @@ pub struct Engine {
+     tree: DevBuf,
+     slots: Vec<Slot>,
+     sequence: u64,
++    start_flag: Option<crate::cuda::StartFlag>,
+     cert: i32,
+     graph_config: Option<(i32, usize)>,
+ }
+@@ -105,6 +107,7 @@ impl Engine {
+             tree: DevBuf::new(crate::proof::ProofCache::heap_bytes(&profile))?,
+             slots,
+             sequence: 0,
++            start_flag: None,
+             cert: 3,
+             graph_config: None,
+         })
+@@ -255,6 +258,53 @@ impl Engine {
+         Ok((ms, count, ids))
+     }
+ 
++    pub const TILE_COUNT: usize = (M / 160) * (N / 256);
++
++    /// One complete, globally indexed output-tile range. Reuse the same
++    /// committed operands on every range of a round, including across a pause.
++    pub fn slice(&mut self, first: usize, end: usize, observe_start: bool) -> Result<Snapshot> {
++        if observe_start && self.start_flag.is_none() { self.start_flag = Some(crate::cuda::StartFlag::new()?); }
++        let flag = self.start_flag.as_ref().filter(|_| observe_start);
++        if let Some(flag) = flag { flag.clear(); }
++
++        ensure!(first < end && end <= Self::TILE_COUNT, "invalid K780 tile range");
++        let Operands::Lean { packed_a, packed_b, packed_ia, packed_ib, .. } = &self.ops else {
++            anyhow::bail!("slices require kernel 780");
++        };
++        let slot = &self.slots[0];
++        if first == 0 { self.prepare(false)?; }
++        self.stream.memset(slot.result.ptr, 0, 4)?;
++        unsafe {
++            rc((self.support.k780_slice)(packed_a.p(), packed_b.p(), packed_ia.p(), packed_ib.p(),
++                M as i32, N as i32, self.profile.k as i32, self.key_a.p(), self.target.p(),
++                slot.result.p(), (slot.result.ptr + 4) as *mut c_void, self.capacity as i32,
++                first as i32, end as i32, flag.map_or(std::ptr::null_mut(), |f| f.device as *mut c_void), self.s()), "kernel 780 slice")?;
++        }
++        let meta = slot.result.ptr + (self.capacity as u64 + 1) * 4;
++        self.stream.copy_d2d(meta, self.signal_ptr(), 64)?;
++        self.stream.copy_d2d(meta + 64, self.root_a.ptr, 32)?;
++        self.stream.copy_d2h(slot.host.ptr, slot.result.ptr, slot.result.bytes)?;
++        slot.event.record(&self.stream)?;
++        self.slots[0].pending = true;
++        self.slots[0].sequence = self.sequence;
++        if end == Self::TILE_COUNT { self.sequence += 1; }
++        let mut observed = 0;
++        if let Some(flag) = flag {
++            let since = std::time::Instant::now();
++            while !flag.seen() && since.elapsed() < std::time::Duration::from_millis(100) {
++                std::thread::sleep(std::time::Duration::from_micros(20));
++            }
++            if flag.seen() { observed = crate::handoff::monotonic_ns(); }
++        }
++        let mut snap = self.collect(0)?;
++        if observe_start && observed == 0 {
++            ensure!(self.start_flag.as_ref().unwrap().seen(), "GPU start flag never arrived");
++            observed = crate::handoff::monotonic_ns();
++        }
++        snap.start_seen_ns = observed;
++        Ok(snap)
++    }
++
+     pub fn depth(&self) -> usize {
+         self.slots.len()
+     }
+@@ -286,6 +336,7 @@ impl Engine {
+         let groups = (0..n).map(|j| u32::from_le_bytes(raw[4 + 4 * j..8 + 4 * j].try_into().unwrap())).collect();
+         let meta = &raw[(cap + 1) * 4..];
+         Ok(Snapshot {
++            start_seen_ns: 0,
+             sequence: slot.sequence,
+             groups,
+             overflow: count.saturating_sub(cap as u32),
+diff --git a/src/kernels.rs b/src/kernels.rs
+index 648381d..6e02486 100644
+--- a/src/kernels.rs
++++ b/src/kernels.rs
+@@ -39,6 +39,7 @@ pub fn selected() -> usize {
+ 
+ pub struct Kernels {
+     pub k780_variants: Vec<K780Fn>,
++    pub k780_slice: unsafe extern "C" fn(C,C,C,C,c_int,c_int,c_int,C,C,P,P,c_int,c_int,c_int,P,P)->c_int,
+     pub k448: unsafe extern "C" fn(C, C, C, C, P, P, c_int, P) -> c_int,
+     pub merkle_init: unsafe extern "C" fn(C, P, c_int, P) -> c_int,
+     pub merkle_root: unsafe extern "C" fn(C, C, C, P, c_int, P) -> c_int,
+@@ -63,6 +64,7 @@ impl Kernels {
+         let h = &lib;
+         let k = Kernels {
+             k780_variants: (0..VARIANTS.len()).map(|i| sym(h, &format!("pm_k780_launch_{i}"))).collect::<Result<_>>()?,
++            k780_slice: sym(h, "pm_k780_slice")?,
+             k448: sym(h, "pm_k448_launch")?,
+             merkle_init: sym(h, "pm_merkle_init")?,
+             merkle_root: sym(h, "pm_merkle_root")?,
+diff --git a/src/main.rs b/src/main.rs
+index df81652..50beef8 100644
+--- a/src/main.rs
++++ b/src/main.rs
+@@ -5,6 +5,7 @@ mod engine;
+ mod fp8test;
+ mod kernels;
+ mod miner;
++mod handoff;
+ mod nvml;
+ mod platform;
+ mod pool;
+@@ -60,6 +61,18 @@ struct Cli {
+     /// Print events as JSON lines instead of the human-readable display
+     #[arg(long)]
+     json: bool,
++    /// Private Linux Unix socket for event-driven suspend/resume of the sliced K780 worker.
++    #[arg(long, conflicts_with_all = ["background","priority","tune","tune_only","self_test","test_fp8"])]
++    control_socket: Option<PathBuf>,
++    /// Stay parked until the controller arms a lifetime WATCH while holding the worker.
++    #[arg(long, requires="control_socket")]
++    require_watch: bool,
++    /// Compare all sliced tickets with the unchanged whole-round graph for each offline nonce.
++    #[arg(long, requires="bench_rounds", conflicts_with="control_socket")]
++    slice_check: bool,
++    /// Number of 160x256 output tiles per independently drained K780 launch.
++    #[arg(long, default_value_t = 188, value_parser=clap::value_parser!(u32).range(1..=26112))]
++    slice_tiles: u32,
+     /// Rounds in flight on the GPU
+     #[arg(long, default_value_t = 2, value_parser = clap::value_parser!(u8).range(2..=4))]
+     depth: u8,
+@@ -297,6 +310,9 @@ fn main() -> Result<()> {
+     let log_path = cli.log.unwrap_or_else(|| PathBuf::from(format!("logs/bpm-{}.jsonl", stamp())));
+     let code = miner::run(miner::MineArgs {
+         pools,
++        control_socket: cli.control_socket,
++        require_watch: cli.require_watch,
++        slice_tiles: cli.slice_tiles as usize,
+         pool_socket,
+         pool_timeout: cli.pool_timeout,
+         failback_minutes: cli.failback_minutes,
+diff --git a/src/miner.rs b/src/miner.rs
+index cdfb2d4..8ba324c 100644
+--- a/src/miner.rs
++++ b/src/miner.rs
+@@ -18,6 +18,9 @@ use std::sync::Arc;
+ use std::time::{Duration, Instant};
+ 
+ pub struct MineArgs {
++    pub control_socket: Option<PathBuf>,
++    pub require_watch: bool,
++    pub slice_tiles: usize,
+     /// Primary pool first, then failover pools.
+     pub pools: Vec<crate::pool::Endpoint>,
+     pub pool_socket: Option<std::net::TcpStream>,
+@@ -110,7 +113,8 @@ fn mine(a: &MineArgs, state: &Arc<State>, log: &Log, run_id: &str) -> Result<i32
+     let mut profile = a.profile;
+     log.event("startup", json!({"endpoint":a.pools.iter().map(|e| e.to_string()).collect::<Vec<_>>().join(", "),"worker":a.worker,"variant":profile.variant(),
+         "k":profile.k,"seconds":a.seconds,"log_path":a.log_path.display().to_string()}));
+-    let device = Device::open(a.device)?;
++    let gate = a.control_socket.as_deref().map(|p| crate::handoff::Gate::listen(p, a.require_watch)).transpose()?;
++    let device = crate::handoff::Gate::initialize(gate.as_deref(), interrupted, || Device::open(a.device))?;
+     let info = device.info()?;
+     let guard = Guard::start(&info.pci_bus_id, a.power_limit, a.max_temp).context("NVML telemetry")?;
+     anyhow::ensure!(info.capability == (12, 0), "the kernels are built for compute capability 12.0 (found {} with {}.{})", info.name, info.capability.0, info.capability.1);
+@@ -186,11 +190,16 @@ fn mine(a: &MineArgs, state: &Arc<State>, log: &Log, run_id: &str) -> Result<i32
+             profile = Profile::new(Kernel::K448, 4096)?;
+             log.event("profile_fallback", json!({"reason":"pool did not negotiate gzip proofs","proof_compression":compression,"variant":448,"k":4096}));
+         }
+-        let mut engine = Engine::new(profile, a.depth, a.hit_capacity)?;
++        let mut engine = crate::handoff::Gate::initialize(gate.as_deref(), interrupted, || Engine::new(profile, a.depth, a.hit_capacity))?;
+         st.start = Instant::now();
+         state.share_rate.lock().unwrap().reset(st.start);
+         st.cpu_start = cpu_seconds();
+-        mining_loop(a, state, log, &mut engine, priority.as_ref(), &check, &proof_tx, &mut st)?;
++        if let Some(gate) = &gate {
++            anyhow::ensure!(engine.profile.kernel == Kernel::K780 && crate::kernels::selected() == 0, "controlled worker requires v1 K780");
++            controlled_loop(a, state, log, &mut engine, gate, &check, &proof_tx, &mut st)?;
++        } else {
++            mining_loop(a, state, log, &mut engine, priority.as_ref(), &check, &proof_tx, &mut st)?;
++        }
+     }
+     // Every completed current-job result is handed off before the sentinel.
+     put(&proof_tx, None, state)?;
+@@ -304,24 +313,6 @@ fn mining_loop(
+         Ok(())
+     };
+ 
+-    let deliver = |generation: &Generation, ctx: &Arc<ProofContext>, snap: Snapshot, st: &mut Stats| -> Result<()> {
+-        if snap.overflow > 0 {
+-            log.event("hit_overflow", json!({"dropped":snap.overflow,"capacity":a.hit_capacity}));
+-        }
+-        if !state.submittable(generation) {
+-            if !snap.groups.is_empty() {
+-                state.add_stale(snap.groups.len() as u64);
+-                log.event("round_discarded", json!({"reason":"job_changed","job_id":generation.job.job_id,"sequence":snap.sequence,"shares":snap.groups.len()}));
+-            }
+-            return Ok(());
+-        }
+-        for &group in &snap.groups {
+-            put(proof_tx, Some(ProofTask { generation: generation.clone(), ctx: ctx.clone(), group, signal: snap.signal, root_a: snap.root_a }), state)?;
+-        }
+-        st.max_proof_queue = st.max_proof_queue.max(proof_tx.len());
+-        Ok(())
+-    };
+-
+     while !time_up(st) && !stop() {
+         check()?;
+         if yielding() {
+@@ -361,7 +352,7 @@ fn mining_loop(
+                 pending.push_back(slot);
+             }
+             // Feed the GPU before queuing CPU work.
+-            deliver(&generation, &ctx, snap, st)?;
++            deliver(state, log, a, proof_tx, &generation, &ctx, snap, st)?;
+             if pending.is_empty() && yielding() {
+                 wait_for_gpu(st)?;
+                 clock.reset();
+@@ -381,3 +372,82 @@ fn mining_loop(
+     }
+     Ok(())
+ }
++
++#[allow(clippy::too_many_arguments)]
++fn deliver(state: &Arc<State>, log: &Log, a: &MineArgs, proof_tx: &crossbeam_channel::Sender<Option<ProofTask>>,
++        generation: &Generation, ctx: &Arc<ProofContext>, snap: Snapshot, st: &mut Stats) -> Result<()> {
++    if snap.overflow > 0 {
++        log.event("hit_overflow", json!({"dropped":snap.overflow,"capacity":a.hit_capacity}));
++    }
++    if !state.submittable(generation) {
++        if !snap.groups.is_empty() {
++            state.add_stale(snap.groups.len() as u64);
++            log.event("round_discarded", json!({"reason":"job_changed","job_id":generation.job.job_id,"sequence":snap.sequence,"shares":snap.groups.len()}));
++        }
++        return Ok(());
++    }
++    let mut dropped = 0;
++    for &group in &snap.groups {
++        let task = Some(ProofTask { generation: generation.clone(), ctx: ctx.clone(), group, signal: snap.signal, root_a: snap.root_a });
++        if a.control_socket.is_some() {
++            match proof_tx.try_send(task) {
++                Ok(()) => (),
++                Err(crossbeam_channel::TrySendError::Full(_)) => dropped += 1,
++                Err(crossbeam_channel::TrySendError::Disconnected(_)) => anyhow::bail!("proof worker disconnected"),
++            }
++        } else {
++            put(proof_tx, task, state)?;
++        }
++    }
++    if dropped > 0 { log.event("proof_queue_full", json!({"dropped":dropped,"sequence":snap.sequence})); }
++    st.max_proof_queue = st.max_proof_queue.max(proof_tx.len());
++    Ok(())
++}
++
++#[allow(clippy::too_many_arguments)]
++fn controlled_loop(a: &MineArgs, state: &Arc<State>, log: &Log, engine: &mut Engine, gate: &crate::handoff::Gate,
++        check: &dyn Fn() -> Result<()>, proof_tx: &crossbeam_channel::Sender<Option<ProofTask>>, st: &mut Stats) -> Result<()> {
++    let started = st.start;
++    let stop = || interrupted() || state.stop_mining.load(Ordering::SeqCst)
++        || (a.seconds > 0.0 && started.elapsed().as_secs_f64() >= a.seconds);
++    let profile = engine.profile;
++    let mut last_stats = Instant::now();
++    while !stop() {
++        check()?;
++        let generation = match state.job() {
++            Some(g) => g,
++            None => { std::thread::sleep(Duration::from_millis(10)); continue; }
++        };
++        let current = || state.job().is_some_and(|g| g.number == generation.number);
++        let job = MiningJob::new((*generation.job).clone(), profile)?;
++        let nonce = a.nonce_start.unwrap_or_else(random_nonce);
++        let setup = gate.run(&stop, |_| {
++            if !current() { return Ok((None, None)); }
++            Ok((Some(engine.set_job(&job, nonce)?), None))
++        })?;
++        let Some(Some((heap, root_b))) = setup else { continue };
++        let ctx = Arc::new(ProofContext { cache: ProofCache::new(profile, heap, job.key, root_b)?, job });
++        log.event("sliced_job", json!({"job_id":generation.job.job_id,"tile_count":Engine::TILE_COUNT,"slice_tiles":a.slice_tiles}));
++        let mut first = 0;
++        while current() && !stop() {
++            check()?;
++            let end = (first + a.slice_tiles).min(Engine::TILE_COUNT);
++            let snap = gate.run(&stop, |observe| {
++                if !current() { return Ok((None, None)); }
++                let snap = engine.slice(first, end, observe)?;
++                let stamp = snap.start_seen_ns;
++                Ok((Some(snap), Some(stamp)))
++            })?;
++            let Some(Some(snap)) = snap else { break };
++            st.macs += ((end - first) * 160 * 256 * profile.k) as f64;
++            first = if end == Engine::TILE_COUNT { st.rounds += 1; 0 } else { end };
++            // GPU drain is acknowledged by the gate before this CPU queue can block.
++            deliver(state, log, a, proof_tx, &generation, &ctx, snap, st)?;
++            if last_stats.elapsed() > Duration::from_secs(30) {
++                log.event("stats", stats_row(state, st, true));
++                last_stats = Instant::now();
++            }
++        }
++    }
++    Ok(())
++}
+diff --git a/src/roundbench.rs b/src/roundbench.rs
+index 89b6c02..dfae7b8 100644
+--- a/src/roundbench.rs
++++ b/src/roundbench.rs
+@@ -7,7 +7,8 @@ use serde_json::json;
+ use std::time::{Instant, SystemTime, UNIX_EPOCH};
+ 
+ pub fn run(cli: &Cli, rounds: u32) -> Result<()> {
+-    let dev = cuda::Device::open(cli.device)?;
++    let gate = cli.control_socket.as_deref().map(|p| crate::handoff::Gate::listen(p, cli.require_watch)).transpose()?;
++    let dev = crate::handoff::Gate::initialize(gate.as_deref(), || false, || cuda::Device::open(cli.device))?;
+     let info = dev.info()?;
+     ensure!(
+         info.capability == (12, 0),
+@@ -28,7 +29,8 @@ pub fn run(cli: &Cli, rounds: u32) -> Result<()> {
+     let header_offset = cli.bench_job.unwrap_or(0);
+     let job = test_job_with_header(profile, header_offset)?;
+     let depth = usize::from(cli.depth);
+-    let mut engine = Engine::new(profile, depth, 4096)?;
++    let mut engine = crate::handoff::Gate::initialize(gate.as_deref(), || false, || Engine::new(profile, depth, 4096))?;
++    if cli.control_socket.is_some() || cli.slice_check { return run_sliced(cli, &mut engine, rounds, &guard, &job, gate.as_deref()); }
+     let first_nonce = cli.bench_nonce.unwrap_or(0);
+     let setup = Instant::now();
+     let (heap, root_b) = engine.set_job(&job, first_nonce)?;
+@@ -93,3 +95,78 @@ pub fn run(cli: &Cli, rounds: u32) -> Result<()> {
+     );
+     Ok(())
+ }
++
++/// Deterministic finite job. In --slice-check mode compare every ticket, nonce
++/// commitment and sample serialized proofs against unchanged full-round graphs.
++fn run_sliced(cli: &Cli, engine: &mut Engine, rounds: u32, guard: &nvml::Guard, job: &crate::protocol::MiningJob, gate: Option<&crate::handoff::Gate>) -> Result<()> {
++    let nonce = cli.bench_nonce.unwrap_or(0);
++    let mut reference = Vec::new();
++    if cli.slice_check {
++        engine.set_job(job, nonce)?;
++        for _ in 0..rounds {
++            guard.check()?;
++            engine.launch(0)?;
++            reference.push(engine.collect(0)?);
++        }
++    }
++    let (heap, root) = match &gate {
++        Some(g) => g.run(|| false, |_| Ok((engine.set_job(job, nonce)?, None)))?.unwrap(),
++        None => engine.set_job(job, nonce)?,
++    };
++    let cache = proof::ProofCache::new(engine.profile, heap, job.key, root)?;
++    let mut digest = blake3::Hasher::new();
++    let began = Instant::now();
++    let mut hits = 0;
++    let mut proof_samples = Vec::new();
++    let mut windows = Vec::new();
++    for n in 0..rounds {
++        let mut current = Vec::new();
++        let mut id = None;
++        for first in (0..Engine::TILE_COUNT).step_by(cli.slice_tiles as usize) {
++            guard.check()?;
++            let end = (first + cli.slice_tiles as usize).min(Engine::TILE_COUNT);
++            let mut op = |observe| {
++                let t = Instant::now();
++                let snap = engine.slice(first, end, observe)?;
++                if windows.len() < 100000 { windows.push(t.elapsed().as_secs_f64()*1e3); }
++                let stamp = snap.start_seen_ns;
++                Ok((snap, Some(stamp)))
++            };
++            let mut snap = match &gate {
++                Some(g) => g.run(|| false, op)?.unwrap(),
++                None => op(false)?.0,
++            };
++            ensure!(snap.overflow == 0, "sliced buffer overflow");
++            let meta = (snap.signal, snap.root_a);
++            ensure!(id.get_or_insert(meta) == &meta, "nonce changed within round");
++            current.append(&mut snap.groups);
++        }
++        current.sort_unstable();
++        let (signal, root_a) = id.unwrap();
++        if cli.slice_check {
++            let reference = &mut reference[n as usize];
++            reference.groups.sort_unstable();
++            ensure!(reference.overflow == 0 && reference.signal == signal && reference.root_a == root_a && reference.groups == current,
++                    "round {n}: sliced snapshot differs from unchanged production graph");
++        }
++        if let Some(&group) = current.first() {
++            if proof_samples.len() < 3 { proof_samples.push((group, signal, root_a)); }
++        }
++        digest.update(&signal); digest.update(&root_a);
++        digest.update(&(current.len() as u32).to_le_bytes());
++        for group in &current { digest.update(&group.to_le_bytes()); }
++        hits += current.len();
++    }
++    let seconds = began.elapsed().as_secs_f64();
++    ensure!(!proof_samples.is_empty(), "fixed job produced no proofs");
++    for (group, signal, root_a) in &proof_samples {
++        proof::verify(job, &cache.proof(*group, signal, root_a)?)?;
++    }
++    windows.sort_by(f64::total_cmp);
++    let pct = |q:f64| windows[((q*windows.len() as f64).ceil() as usize).max(1)-1];
++    println!("{}", json!({"k":engine.profile.k,"rounds":rounds,"slice_tiles":cli.slice_tiles,"tile_count":Engine::TILE_COUNT,
++        "compared_whole":cli.slice_check,"hits":hits,"verified_proofs":proof_samples.len(),"hit_digest":digest.finalize().to_hex().as_str(),
++        "seconds":seconds,"tmac_s":rounds as f64 * engine.profile.macs_per_round()/seconds/1e12,
++        "slice_host_to_completed_ms":{"p50":pct(0.50),"p95":pct(0.95),"p99":pct(0.99),"max":pct(1.0),"samples":windows.len()}}));
++    Ok(())
++}
+diff --git a/src/handoff.rs b/src/handoff.rs
+new file mode 100644
+index 0000000..1232048
+--- /dev/null
++++ b/src/handoff.rs
+@@ -0,0 +1,172 @@
++//! Linux worker control. Exactly one GPU operation may be committed at a time.
++//! A HOLD and a new launch contend for the same mutex; proof work runs outside it.
++use anyhow::{ensure, Context, Result};
++use serde_json::json;
++use std::fs;
++use std::io::{BufRead, BufReader, Read, Write};
++use std::os::unix::fs::{MetadataExt, PermissionsExt};
++use std::os::unix::net::{UnixListener, UnixStream};
++use std::path::Path;
++use std::sync::{Arc, Condvar, Mutex};
++use std::time::Duration;
++
++#[derive(Default)]
++struct State {
++    holds: u64,
++    busy: bool,
++    watched: bool,
++    faulted: bool,
++    completed: u64,
++    release: u64,
++    first_begin: u64,
++    first_end: u64,
++    first_gpu_seen: u64,
++}
++
++pub struct Gate {
++    require_watch: bool,
++    state: Mutex<State>,
++    changed: Condvar,
++}
++
++pub fn monotonic_ns() -> u64 {
++    let mut t = libc::timespec { tv_sec: 0, tv_nsec: 0 };
++    assert_eq!(unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut t) }, 0);
++    t.tv_sec as u64 * 1_000_000_000 + t.tv_nsec as u64
++}
++
++impl Gate {
++    pub fn listen(path: &Path, require_watch: bool) -> Result<Arc<Self>> {
++        let parent = path.parent().context("worker socket needs a directory")?;
++        let dir = fs::metadata(parent)?;
++        ensure!(dir.is_dir() && dir.mode() & 0o077 == 0, "use a private (0700) control directory");
++        let server = UnixListener::bind(path).context("bind worker socket; use a fresh path")?;
++        fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
++        let gate = Arc::new(Self { require_watch, state: Mutex::new(State::default()), changed: Condvar::new() });
++        let control = gate.clone();
++        std::thread::Builder::new().name("pearl-control".into()).spawn(move || {
++            for stream in server.incoming() {
++                let Ok(stream) = stream else { break };
++                let gate = control.clone();
++                if std::thread::Builder::new().name("pearl-lease".into())
++                    .spawn(move || { let _ = gate.connection(stream); }).is_err() { break; }
++            }
++            control.fault();
++        })?;
++        Ok(gate)
++    }
++
++    fn fault(&self) {
++        self.state.lock().unwrap().faulted = true;
++        self.changed.notify_all();
++    }
++
++    fn connection(&self, mut stream: UnixStream) -> Result<()> {
++        let mut input = BufReader::new(stream.try_clone()?);
++        let mut command = String::new();
++        (&mut input).take(16).read_line(&mut command)?;
++        if command == "STATUS\n" {
++            let s = self.state.lock().unwrap();
++            let row = json!({"require_watch":self.require_watch,"watched":s.watched,"gpu_busy":s.busy,"holds":s.holds,"faulted":s.faulted,"completed_slices":s.completed,
++                "release_ns":s.release,"first_slice_begin_ns":s.first_begin,"first_slice_end_ns":s.first_end,"first_gpu_seen_ns":s.first_gpu_seen});
++            drop(s);
++            writeln!(stream, "{row}")?;
++            return Ok(());
++        }
++        if command == "WATCH\n" {
++            let mut s = self.state.lock().unwrap();
++            ensure!(self.require_watch && s.holds > 0 && !s.busy && !s.watched && !s.faulted,
++                "WATCH requires a drained, held, supervised worker");
++            s.watched = true;
++            drop(s);
++            // This connection has no further commands. EOF, unexpected data or a failed
++            // acknowledgement revokes the watch before any following permit can commit.
++            let observed = stream.write_all(b"WATCHING\n").and_then(|_| input.read(&mut [0u8]));
++            self.state.lock().unwrap().watched = false;
++            self.changed.notify_all();
++            observed?;
++            return Ok(());
++        }
++        ensure!(command == "HOLD\n", "invalid command");
++        let mut s = self.state.lock().unwrap();
++        s.holds += 1;
++        while s.busy && !s.faulted {
++            s = self.changed.wait(s).unwrap();
++        }
++        ensure!(!s.faulted, "worker stopped");
++        drop(s);
++        let result = (|| -> Result<()> {
++            stream.write_all(b"DRAINED\n")?;
++            command.clear();
++            (&mut input).take(16).read_line(&mut command)?;
++            ensure!(command == "RELEASE\n", "lease ended without explicit release");
++            Ok(())
++        })();
++        if let Err(e) = result {
++            // The caller may still be running inference. Restart this worker only after reconciliation.
++            self.fault();
++            return Err(e);
++        }
++        let mut s = self.state.lock().unwrap();
++        s.holds -= 1;
++        if s.holds == 0 {
++            s.release = monotonic_ns();
++            s.first_begin = 0;
++            s.first_end = 0;
++            s.first_gpu_seen = 0;
++        }
++        drop(s);
++        self.changed.notify_all();
++        stream.write_all(b"RELEASED\n")?;
++        Ok(())
++    }
++
++    /// Run cold GPU context and engine initialization under the same permit.
++    pub fn initialize<T>(gate: Option<&Self>, stop: impl Fn() -> bool, init: impl FnOnce() -> Result<T>) -> Result<T> {
++        match gate {
++            None => init(),
++            Some(g) => g.run(stop, |_| {
++                let initialized = init()?;
++                crate::cuda::synchronize_context()?;
++                Ok((initialized, None))
++            })?.context("worker stopped during initialization"),
++        }
++    }
++
++    /// The caller's closure must wait for the CUDA completion event before returning.
++    /// None means administrative/nonproductive work. Some holds the GPU start observation (0 if not sampled).
++    pub fn run<T>(&self, stop: impl Fn() -> bool, op: impl FnOnce(bool) -> Result<(T, Option<u64>)>) -> Result<Option<T>> {
++        let mut s = self.state.lock().unwrap();
++        while s.holds != 0 || s.faulted || (self.require_watch && !s.watched) {
++            if stop() { return Ok(None); }
++            // Administrative watchdog only. Releases and drains signal immediately.
++            s = self.changed.wait_timeout(s, Duration::from_millis(100)).unwrap().0;
++        }
++        if stop() { return Ok(None); }
++        assert!(!s.busy);
++        s.busy = true;
++        let observe_start = s.release != 0 && s.first_end == 0;
++        let begin = monotonic_ns();
++        drop(s);
++        let result = op(observe_start);
++        let end = monotonic_ns();
++        let mut s = self.state.lock().unwrap();
++        if let Ok((_, issued)) = &result {
++            if let Some(seen_ns) = *issued {
++                s.completed += 1;
++                if s.release > 0 && s.first_end == 0 {
++                    s.first_begin = begin;
++                    s.first_end = end;
++                    s.first_gpu_seen = seen_ns;
++                }
++            }
++        } else {
++            // A failed launch or event cannot certify that the GPU is idle.
++            s.faulted = true;
++        }
++        s.busy = false;
++        drop(s);
++        self.changed.notify_all();
++        result.map(|(value, _)| Some(value))
++    }
++}

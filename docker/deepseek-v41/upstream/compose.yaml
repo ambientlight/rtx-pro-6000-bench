@@ -1,0 +1,39 @@
+name: dsv41-upstream-canary
+services:
+  deepseek:
+    image: ${DSV41_CANDIDATE_IMAGE:-dsv41-upstream-sm120:local}
+    pull_policy: never
+    cgroup_parent: dsv41.slice
+    gpus: all
+    ipc: host
+    cap_add: [IPC_LOCK, SYS_PTRACE]
+    ulimits:
+      memlock: {soft: -1, hard: -1}
+      core: {soft: 0, hard: 0}
+    ports:
+      - "127.0.0.1:18000:18000"
+    volumes:
+      - type: bind
+        source: /mnt/hot/ambientlight/models/DeepSeek-V4.1-Flash-1017
+        target: /models/DeepSeek-V4.1-Flash
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: /mnt/hot/dsv4_state/anthropic-thinking.key
+        target: /run/dsv41/anthropic-thinking.key
+        read_only: true
+        bind: {create_host_path: false}
+      - state:/state
+      - kernels:/root/.cache
+    healthcheck:
+      test: ["CMD", "python3", "/opt/dsv41/boot.py", "health"]
+      interval: 30s
+      timeout: 10s
+      start_period: 30m
+    logging:
+      driver: journald
+      options: {tag: "{{.Name}}", mode: non-blocking, max-buffer-size: "4m"}
+    stop_grace_period: 90s
+volumes:
+  state:
+  kernels:

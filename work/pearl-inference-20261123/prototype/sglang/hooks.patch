@@ -1,0 +1,286 @@
+--- a/python/sglang/srt/managers/tokenizer_manager.py
++++ b/python/sglang/srt/managers/tokenizer_manager.py
+@@ -176,6 +176,8 @@
+ 
+ _REQUEST_STATE_WAIT_TIMEOUT = envs.SGLANG_REQUEST_STATE_WAIT_TIMEOUT.get()
+ 
++from sglang.srt import pearl_runtime as pearl
++
+ logger = logging.getLogger(__name__)
+ 
+ 
+@@ -415,6 +417,7 @@
+     ):
+         # Parse args
+         self.server_args = server_args
++        pearl.validate_config(server_args)
+         assert_published(server_args, role="tokenizer")
+         self.startup_time: Optional[Dict[str, Any]] = None
+         self.elastic_worker_count = get_parallel().dp_size
+@@ -802,7 +805,14 @@
+ 
+         self._init_req_state(obj, request)
+         request_rids = {obj.rid} if obj.is_single else set(obj.rid)
++        pearl_admission = pearl.Admission(pearl.SOCKET) if pearl.SOCKET else None
+         try:
++            if pearl_admission is not None:
++                await pearl_admission.start()
++                mossvl = (self.mm_processor is not None and
++                          "MossVLForConditionalGeneration" in self.model_config.hf_config.architectures)
++                if obj.contains_mm_input() or mossvl or obj.lora_path or get_disagg().language_only:
++                    await pearl_admission.wait()
+             if get_disagg().language_only:
+                 self._handle_epd_disaggregation_encode_request(obj)
+ 
+@@ -821,12 +831,14 @@
+                     state = self.rid_to_state[obj.rid]
+                     if obj.return_prompt_token_ids:
+                         state.prompt_token_ids = list(tokenized_obj.input_ids)
+-                    await self._send_one_request(tokenized_obj)
++                    await self._send_one_request(tokenized_obj, pearl_admission)
++                    if pearl_admission is not None:
++                        await pearl_admission.close()
+                     async for response in self._wait_one_response(obj, request):
+                         yield response
+                 else:
+                     async for response in self._handle_batch_request(
+-                        obj, request, request_rids
++                        obj, request, request_rids, pearl_admission
+                     ):
+                         yield response
+         except BaseException:
+@@ -839,6 +851,9 @@
+             # cleanup.
+             self._release_req_states_on_failure(request_rids)
+             raise
++        finally:
++            if pearl_admission is not None:
++                await pearl_admission.close()
+ 
+     def _detect_input_format(
+         self, texts: Union[str, List[str]], is_cross_encoder: bool
+@@ -1584,6 +1599,7 @@
+     async def _send_one_request(
+         self,
+         tokenized_obj: Union[TokenizedGenerateReqInput, TokenizedEmbeddingReqInput],
++        pearl_admission=None,
+     ):
+         prepared_mm_items = []
+         dispatched = False
+@@ -1597,7 +1613,10 @@
+             tokenized_obj = wrap_shm_features(tokenized_obj)
+             time_stats = tokenized_obj.time_stats
+             tokenized_obj.wrap_pickle_fields()
+-            self._dispatch_to_scheduler(tokenized_obj)
++            if pearl_admission is None:
++                self._dispatch_to_scheduler(tokenized_obj)
++            else:
++                await pearl_admission.dispatch(self._dispatch_to_scheduler, tokenized_obj, [tokenized_obj])
+             self._mark_state_dispatched(tokenized_obj.rid)
+             dispatched = True
+             tokenized_obj.time_stats = time_stats
+@@ -1621,6 +1640,7 @@
+         tokenized_objs: List[
+             Union[TokenizedGenerateReqInput, TokenizedEmbeddingReqInput]
+         ],
++        pearl_admission=None,
+     ):
+         """Send a batch of tokenized requests as a single batched request to the scheduler."""
+         prepared_mm_items = []
+@@ -1642,7 +1662,10 @@
+             else:
+                 batch_req = BatchTokenizedEmbeddingReqInput(batch=tokenized_objs)
+ 
+-            self._dispatch_to_scheduler(batch_req)
++            if pearl_admission is None:
++                self._dispatch_to_scheduler(batch_req)
++            else:
++                await pearl_admission.dispatch(self._dispatch_to_scheduler, batch_req, tokenized_objs)
+             for tokenized_obj in tokenized_objs:
+                 self._mark_state_dispatched(tokenized_obj.rid)
+             dispatched = True
+@@ -1860,6 +1883,7 @@
+         obj: Union[GenerateReqInput, EmbeddingReqInput],
+         request: Optional[fastapi.Request] = None,
+         request_rids: Optional[set[str]] = None,
++        pearl_admission=None,
+     ):
+         if request_rids is None:
+             request_rids = set(obj.rid)
+@@ -1870,7 +1894,7 @@
+         if getattr(obj, "parallel_sample_num", 1) == 1:
+             if self._should_use_batch_tokenization(batch_size, obj):
+                 tokenized_objs = await self._batch_tokenize_and_process(batch_size, obj)
+-                await self._send_batch_request(tokenized_objs)
++                await self._send_batch_request(tokenized_objs, pearl_admission)
+ 
+                 # Set up generators for each request in the batch
+                 for i in range(batch_size):
+@@ -1895,7 +1919,7 @@
+                         state = self.rid_to_state[tmp_obj.rid]
+                         if tmp_obj.return_prompt_token_ids:
+                             state.prompt_token_ids = list(tokenized_obj.input_ids)
+-                        await self._send_one_request(tokenized_obj)
++                        await self._send_one_request(tokenized_obj, pearl_admission)
+                         generators.append(self._wait_one_response(tmp_obj, request))
+                         rids.append(tmp_obj.rid)
+         else:
+@@ -1929,7 +1953,7 @@
+                 tokenized_obj.stream = False
+                 self._init_req_state(tmp_obj)
+                 request_rids.add(tmp_obj.rid)
+-                await self._send_one_request(tokenized_obj)
++                await self._send_one_request(tokenized_obj, pearl_admission)
+                 await self._wait_one_response(tmp_obj, request).__anext__()
+ 
+             # Expand requests, assign new rids for them, and send them
+@@ -1950,13 +1974,15 @@
+                     tokenized_obj.time_stats = state.time_stats
+                     if tmp_obj.return_prompt_token_ids:
+                         state.prompt_token_ids = list(tokenized_objs[i].input_ids)
+-                    await self._send_one_request(tokenized_obj)
++                    await self._send_one_request(tokenized_obj, pearl_admission)
+                     generators.append(self._wait_one_response(tmp_obj, request))
+                     rids.append(tmp_obj.rid)
+ 
+                 self.rid_to_state[objs[i].rid].time_stats.set_finished_time()
+                 del self.rid_to_state[objs[i].rid]
+ 
++        if pearl_admission is not None:
++            await pearl_admission.close()
+         # Wait for all requests
+         is_stream = hasattr(obj, "stream") and obj.stream
+         if not is_stream:
+--- a/python/sglang/srt/managers/io_struct.py
++++ b/python/sglang/srt/managers/io_struct.py
+@@ -1068,6 +1068,8 @@
+     # Cache namespace used to isolate otherwise-identical prefixes.
+     cache_salt: Optional[str] = None
+ 
++    pearl_dispatch_id: Optional[str] = None
++
+     def wrap_pickle_fields(self):
+         self.time_stats = wrap_as_pickle(self.time_stats)
+ 
+@@ -1354,6 +1356,8 @@
+     # Pickled Optional[Union[APIServerReqTimeStats, DPControllerReqTimeStats]]
+     time_stats: Optional[PickleWrapper] = None
+ 
++    pearl_dispatch_id: Optional[str] = None
++
+     def wrap_pickle_fields(self):
+         self.time_stats = wrap_as_pickle(self.time_stats)
+ 
+--- a/python/sglang/srt/managers/scheduler.py
++++ b/python/sglang/srt/managers/scheduler.py
+@@ -357,6 +357,8 @@
+         pass
+ 
+ 
++from sglang.srt import pearl_runtime as pearl
++
+ logger = logging.getLogger(__name__)
+ 
+ 
+@@ -2015,6 +2017,8 @@
+         self.session_controller.maybe_reap(now)
+ 
+         for recv_req in recv_reqs:
++            if pearl.SOCKET or pearl.OBSERVE:
++                pearl.scheduler_rank(self.ps.tp_rank).receive(self._tokenized_requests(recv_req))
+             vmm_errors = None
+             if get_mm().mm_feature_transport == "cuda_vmm":
+                 vmm_errors = self._materialize_cuda_vmm_inputs(recv_req)
+@@ -4651,6 +4655,10 @@
+             self.load_inquirer.get_loads, force=True, snapshot=snapshot
+         )
+ 
++        if pearl.SOCKET or pearl.OBSERVE:
++            pearl.scheduler_rank(self.ps.tp_rank).idle(
++                lambda: torch.cuda.synchronize(self.ps.gpu_id)
++            )
+         # sleep until next event
+         self.maybe_sleep_on_idle()
+ 
+--- a/python/sglang/srt/layers/linear.py
++++ b/python/sglang/srt/layers/linear.py
+@@ -9,6 +9,8 @@
+ from typing import TYPE_CHECKING, Dict, List, Optional, Tuple
+ 
+ import torch
++
++from sglang.srt import pearl_runtime as pearl
+ from torch import nn
+ from torch.nn.parameter import Parameter, UninitializedParameter
+ 
+@@ -1615,6 +1617,7 @@
+         skip_all_reduce=False,
+         forward_batch=None,
+         output_tensor=None,
++        pearl_batch=None,
+     ):
+         if self.input_is_parallel:
+             input_parallel = input_
+@@ -1651,7 +1654,9 @@
+                 get_tp_group(), disabled=not is_allocation_symmetric()
+             )
+         with symm_ctx:
+-            if output_tensor is None:
++            if pearl_batch is not None and output_tensor is None:
++                output_parallel = pearl.project(self, input_parallel, bias_, pearl_batch)
++            elif output_tensor is None:
+                 output_parallel = self.quant_method.apply(
+                     self, input_parallel, bias=bias_
+                 )
+--- a/python/sglang/srt/models/deepseek_v4.py
++++ b/python/sglang/srt/models/deepseek_v4.py
+@@ -270,6 +270,8 @@
+     )
+ 
+ 
++from sglang.srt import pearl_runtime as pearl
++
+ logger = logging.getLogger(__name__)
+ 
+ _FP8_WO_A_GEMM = envs.SGLANG_OPT_FP8_WO_A_GEMM.get()
+@@ -2075,7 +2077,10 @@
+                         self.o_lora_rank,
+                     )
+ 
+-        o, _ = self.wo_b(o.flatten(1))
++        if pearl.OBSERVE and getattr(self, "pearl_target_layer", False):
++            o, _ = self.wo_b(o.flatten(1), pearl_batch=forward_batch)
++        else:
++            o, _ = self.wo_b(o.flatten(1))
+         if self.attn_tp_size > 1 and self.attn_tp_size < get_parallel().tp_size:
+             o = attn_tp_all_reduce(o)
+ 
+@@ -2139,6 +2144,8 @@
+             alt_streams=alt_streams,
+             compress_ratio_override=compress_ratio_override,
+         )
++        # MTP/NextN also constructs a local layer 0 with different weights.
++        self.self_attn.pearl_target_layer = layer_id == 0 and not is_nextn
+         moe_alt_stream = (
+             alt_streams[0]
+             if (
+--- a/python/sglang/srt/model_executor/runner/decode_cuda_graph_runner.py
++++ b/python/sglang/srt/model_executor/runner/decode_cuda_graph_runner.py
+@@ -130,6 +130,8 @@
+ except ImportError:
+     KTRANSFORMERS_AVAILABLE = False
+ 
++from sglang.srt import pearl_runtime as pearl
++
+ logger = logging.getLogger(__name__)
+ 
+ if TYPE_CHECKING:
+@@ -1526,6 +1528,8 @@
+             if shared_read_ends is SharedReadEnds.PRE_REPLAY:
+                 self._publish_read_done(in_graph=False)
+ 
++            if pearl.OBSERVE:
++                pearl.before_replay(self, forward_batch)
+             output = self.backend.replay(self._replay_graph_key, forward_batch)
+ 
+             if shared_read_ends is SharedReadEnds.IN_REPLAY:
