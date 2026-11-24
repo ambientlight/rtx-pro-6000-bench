@@ -134,3 +134,24 @@ When promoting from a live private qualification deployment, use `PEARL_NATIVE_I
 On November 23 the first promotion overlapped the private guard restoring the stock container during shutdown. The stock container was stopped while its API was still starting, and the native deployment started against exclusive GPUs. The production receipt records the four scheduler PIDs and CUDA-context matches, four passing startup smokes, advancing scans in both phases and F2Pool acknowledgements on each GPU. The promotion and fallback regression tests cover the overlapping-start case. This activation did not include a host reboot. [Production activation](production.json)
 
 The superseded system-level `pearl-f2pool.service` was stopped but enabled at activation. This host requires interactive administrator authentication for `sudo systemctl disable pearl-f2pool.service`. Disable that unit before rebooting so only the enabled native service claims the GPUs.
+
+### Workload-based memory clocks on htower
+
+The clock controller observes the live native broker's idle permit. Five continuous idle seconds open a local socket that holds the four GPUs at 7,001 MHz. A new inference claim closes the socket and requests automatic memory clocks while the miner drains. Mining resumes as soon as the broker grants the next idle permit. The controller runs as the serving user. Systemd executes two fixed NVIDIA commands for the four named GPU UUIDs. Closing the connection or losing the controller triggers the reset. [Controller](clock/watch_clock.py) · [Clock service](clock/dsv41-memory-clock@.service)
+
+As `ambientlight` on `htower`, install the root-owned socket once. Opening the listener leaves the current clock policy in effect until the first mining lease.
+
+```sh
+f=/mnt/hot/ambientlight/sglang-sm120-runtime/native-integration/docker/deepseek-v41/upstream/graph-275/f2pool
+bash "$f/native/clock/install-clock-lease.sh"
+```
+
+To qualify the policy on the running non-joined service, use a fresh result directory. The first arm uses automatic clocks. The second runs its own clock controller and releases it at the end. The comparison checks prompt hashes, token counts, CUDA graphs, scheduler and pool identities, and a sustained paid mining window.
+
+```sh
+trial=$(mktemp -d)
+python3 "$f/native_clock_bench.py" automatic "$trial/automatic.json"
+python3 "$f/native_clock_trial.py" "$trial/automatic.json" "$trial"
+```
+
+The user unit can run the controller across serving restarts after qualification. Install `watch_clock.py` as `~/.local/libexec/dsv41-watch-clock.py` and the user unit under `~/.config/systemd/user/`. Then reload the user manager and enable `dsv41-adaptive-clock.service`. Stopping the user unit releases its clock lease. [Serving-side systemd unit](clock/dsv41-adaptive-clock.service)
