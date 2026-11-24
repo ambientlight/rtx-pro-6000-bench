@@ -64,6 +64,9 @@ class TestGateway(unittest.IsolatedAsyncioTestCase):
         receipt = json.loads((self.path/"public.json").read_text())
         self.assertEqual(receipt["accepted"], 1)
         self.assertEqual(receipt["duplicate"], 1)
+        self.assertEqual(receipt["phases"]["decode"], dict(submitted=1, accepted=1,
+                         rejected=0, unknown=0, accepted_expected_macs=1 << 52))
+        self.assertEqual(receipt["phases"]["prefill"]["submitted"], 0)
         self.assertEqual(receipt["last_accepted"]["tp_rank"], 2)
         self.assertEqual(receipt["last_accepted"]["target"], public_job()["target"])
         first = receipt["last_accepted"]

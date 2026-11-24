@@ -1,4 +1,4 @@
-"""Forward checkpoint-verified public inference openings to the configured F2Pool account."""
+"""Forward checkpoint-verified openings from authorized inference to the configured F2Pool account."""
 import argparse
 import asyncio
 import base64
@@ -106,7 +106,9 @@ class Gateway:
         self.unconfirmed = OrderedDict()
         self.seen = OrderedDict()
         self.state = dict(run_id=secrets.token_hex(16), started_utc_epoch=time.time(),
-                          endpoint=f"{HOST}:{PORT}", scope="isolated public inference, no direct miners",
+                          endpoint=f"{HOST}:{PORT}", scope="joined inference submissions only; direct workers use separate pool connections",
+                          phases={phase: dict(submitted=0, accepted=0, rejected=0, unknown=0,
+                                              accepted_expected_macs=0) for phase in ("prefill", "decode")},
                           verifier_sha256=VERIFIER_SHA, submitted=0, accepted=0, rejected=0,
                           stale=0, unknown=0, invalid=0, duplicate=0, disarmed=0,
                           pool_stale=0, notifications=0, connections=0, first_accepted=None,
@@ -188,11 +190,15 @@ class Gateway:
             if record is None:
                 return
             self.state["unknown"] -= 1
+            self.state["phases"][record["phase"]]["unknown"] -= 1
             future = None
         self.state[outcome] += 1
+        phase = self.state["phases"][record["phase"]]
+        phase[outcome] += 1
         settled = dict(record, outcome=outcome, reply_monotonic_ns=time.monotonic_ns())
         self.state["last_settled"] = settled
         if outcome == "accepted":
+            phase["accepted_expected_macs"] += (1 << 256) // (int(record["target"], 16) + 1)
             self.state["last_accepted"] = settled
             if self.state["first_accepted"] is None:
                 self.state["first_accepted"] = settled
@@ -302,6 +308,7 @@ class Gateway:
                       sent_monotonic_ns=time.monotonic_ns())
         self.pending[serial] = (future, record)
         self.state["submitted"] += 1
+        self.state["phases"][record["phase"]]["submitted"] += 1
         self.state["last_submission"] = record
         self.save()
         try:
