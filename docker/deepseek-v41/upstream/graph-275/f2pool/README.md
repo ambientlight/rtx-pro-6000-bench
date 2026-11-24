@@ -1,5 +1,7 @@
 # F2Pool verification with public DeepSeek requests
 
+The [November 23 real-use trial](evidence/real-use-2026-11-23/README.md) records live F2Pool acknowledgements, joined inference work, direct Responses throughput, handoff timing and cooling at 275 W.
+
 Four joined SGLang ranks receive a live Pearl v3 job through one authenticated F2Pool worker. The gateway uses the host's existing F2Pool mining account. The verification worker name is `joinedverify`. The GPU experiment uses a private serving port, public generated prompts and zero standalone miners, so a pool acknowledgement can be attributed to the inference experiment. [F2Pool Pearl endpoint](https://f2pool.zendesk.com/hc/en-us/articles/59741375087385-Pearl-PRL-pool-launched)
 
 The gateway records a share as accepted when F2Pool returns a successful reply for the outstanding submission ID on its originating connection. Before submission it checks a unique match for opened weight bytes against the four pinned layer-zero checkpoint shards and runs the independently pinned Rust verifier against the corresponding F2Pool header and share target. The private gateway credential admits at most four local clients. [Protocol and receipt fields](GATEWAY.md) Arming after startup rotates their local job ID and excludes startup work. Proofs contain sampled activation and weight data. The gateway sends eligible proofs from public test inputs and keeps hashes and counters in its receipt. The F2Pool account, serving API key and raw proof are excluded from the evidence directory.
