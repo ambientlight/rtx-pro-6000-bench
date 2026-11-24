@@ -18,6 +18,22 @@ Use `set-mode joined` in the same command to restore inference mining. The selec
 
 The `tiles` field in the owner-only `native-production/config.json` sets the maximum size of a mining slice. The service reads it at startup. For a fresh installation, `native_host.py prepare --slice-tiles N` sets the value while staging the release. Use 188 to reproduce the original fast-handoff configuration. For offline reporting, a scrubbed session `config.json` containing only `tiles` is sufficient.
 
+### Paid mining and handoff latency at 3,008 tiles
+
+The four Max-Q GPUs ran at 275 W each with 7,001 MHz memory during both 90-second mining windows. Each setting also served 32 public streaming Responses requests on the production endpoint. The table reports fleet mining work from completed tiles and compute-engine activity from NVIDIA's GPM counters.
+
+| Measured on htower | 188 tiles | 3,008 tiles |
+|---|---:|---:|
+| Completed mining work, TMAC/s | 1,200.7 | 1,237.2 |
+| Compute engine busy | 95.14% | 99.57% |
+| Dense INT8 efficiency at the observed SM clocks | 89.50% | 94.58% |
+| Inference demand to all mining GPUs drained, p95 | 1.89 ms | 26.28 ms |
+| Client terminal response to first mining work, p95 | 20.39 ms | 19.97 ms |
+| Broker release to first mining work, p95 | 0.25 ms | 0.26 ms |
+| Peak GPU core temperature | 89°C | 91°C |
+
+The larger slice increased completed work by 3.03%. F2Pool accepted 28 shares with zero rejects in that mining window. All four worker IDs matched the previous deployment. In the fixed-job comparison, 12,032 tiles averaged 0.14% more work than 3,008 tiles and increased p99 slice duration from 26.1 to 104.0 ms. All five sizes matched reference digests, and 180 sampled proofs passed CPU verification. [Per-GPU counters, test headers and handoff distributions](k780-slice-size-275w.json)
+
 ## Non-joined production results on November 24
 
 The canonical Responses endpoint runs in non-joined mode. All four schedulers reported their borrowed CUDA context, the idle K780 library and a disabled Pearl inference operator. Each rank replayed the full DSPARK decode graph. All four startup smokes passed, and F2Pool acknowledged direct work from all four schedulers. [Measurement and activation evidence](non-joined-qualification.json)
