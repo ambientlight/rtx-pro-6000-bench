@@ -180,7 +180,14 @@ def capture_project(layer, x, bias, batch):
         build = os.environ["PEARL_OPERATOR_BUILD"]
         adapter = eager._candidate(os.environ["PEARL_CHECKPOINT_DIR"], build, int(rank), device)
         graph = _by_device[device] = GraphVerify(adapter, Path(build), x.device)
-    return graph.capture(x)
+    if x.shape[0] != batch.batch_size * 6:
+        raise ValueError("Layer-zero activation shape differs from the fixed target-verify graph")
+    result = graph.capture(x)
+    if torch.cuda.is_current_stream_capturing():
+        # Each attention/logits variant must actually capture the real kernel. A shape
+        # previously warmed by another variant does not establish this graph's provenance.
+        batch.pearl_captured_projection_count = getattr(batch, "pearl_captured_projection_count", 0) + 1
+    return result
 
 
 def begin_graph(device, rows, executed, eligible):
