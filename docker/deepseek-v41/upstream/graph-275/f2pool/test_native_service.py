@@ -1,13 +1,56 @@
+from contextlib import ExitStack
+import io
+import os
 from pathlib import Path
 import subprocess
 import tempfile
+import threading
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import native_service as service
 
 
 class ServingMode(unittest.TestCase):
+    def test_supervisor_arms_and_runs_gateway_only_in_joined_mode(self):
+        for mode in service.MODES:
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as tmp, ExitStack() as patches:
+                root = Path(tmp)
+                run = root / "run"
+                (run/"serving").mkdir(parents=True)
+                (run/"receipts").mkdir()
+                for smoke in service.host.SMOKES:
+                    service.save(run/"serving"/smoke, {"status":"passed"})
+                started = []
+                stop = threading.Event()
+                def launch(children, session, name, argv, env=None):
+                    started.append(name)
+                    if name=="broker":
+                        (root/"broker.sock").touch()
+                    elif name=="gateway":
+                        (run/"receipts/gateway.json").touch()
+                    children[name] = Mock()
+                    children[name].poll.return_value = None
+                def notify(text):
+                    if text.startswith("READY=1"):
+                        stop.set()
+                old_umask = os.umask(0o077)
+                patches.callback(os.umask, old_umask)
+                patches.enter_context(patch.dict(os.environ, {"RUNTIME_DIRECTORY":str(root)}))
+                for target, name, value in ((service,"selected_mode",mode),(service,"fresh_session",run),
+                    (service.host,"cards",[60]*4),(service.threading,"Event",stop),
+                    (service.urllib.request,"urlopen",io.BytesIO(b'{"data":[{"id":"deepseek-v4-flash"}]}'))):
+                    patches.enter_context(patch.object(target,name,return_value=value))
+                for target,name in ((service.host,"check_artifacts"),(service,"exclusive_devices"),
+                                    (service.signal,"signal"),(service,"stop_children")):
+                    patches.enter_context(patch.object(target,name))
+                patches.enter_context(patch.object(service,"launch",side_effect=launch))
+                patches.enter_context(patch.object(service,"notify",side_effect=notify))
+                service.serve()
+                self.assertEqual(started,["broker","gateway","model"] if mode=="joined" else ["broker","model"])
+                ready=service.read(run/"ready.json")
+                self.assertEqual((ready["mode"],ready["inference_proofs_enabled"]),(mode,mode=="joined"))
+
     def test_mode_persists_and_invalid_updates_preserve_selection(self):
         with tempfile.TemporaryDirectory() as tmp, patch.object(service, "RELEASE", Path(tmp)):
             self.assertEqual(service.selected_mode(), "joined")

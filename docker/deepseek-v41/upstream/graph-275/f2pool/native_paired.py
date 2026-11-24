@@ -12,11 +12,11 @@ from throughput import write
 
 
 @contextmanager
-def park(i):
+def park(i, *, broker=None):
     token=f"native-control-{i}"
     with socket.socket(socket.AF_UNIX) as connection:
         connection.settimeout(8)
-        connection.connect(str(host.SOCKET))
+        connection.connect(str(broker or host.SOCKET))
         connection.sendall(f"LEASE {token}\n".encode())
         if connection.makefile("rb").readline()!=b"DRAINED\n":
             raise RuntimeError("Control arm failed to drain idle work")

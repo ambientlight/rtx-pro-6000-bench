@@ -77,7 +77,8 @@ def summary(inference):
 
 
 def report(bench, run, out):
-    read = lambda path: json.loads(path.read_text())
+    def read(path):
+        return json.loads(path.read_text())
     capture = read(bench/"standalone.json")
     control = capture["counters_by_rank"]
     # Independent process startup can place the final snapshot on opposite sides
@@ -89,6 +90,9 @@ def report(bench, run, out):
                      for row in csv.reader(stream) if len(row)==9]
     serving = read(bench/"non-joined.json")
     joined = read(bench/"joined.json")
+    live = read(bench/"non-joined-live.json")
+    if live["mode"]!="non-joined" or live["inference_gateway"] is not None or live["run"]!=run.name:
+        raise ValueError("Idle benchmark and canonical non-joined activation must refer to the same session")
     if not serving.get("complete"):
         raise ValueError("Non-joined inference benchmark is incomplete")
     indexed = {r["prompt_sha256"]:r for r in serving["rows"]}
@@ -96,21 +100,46 @@ def report(bench, run, out):
         new = indexed[old["prompt_sha256"]]
         if any(old[k]!=new[k] for k in ("input_tokens","output_tokens","cached_tokens","budget")):
             raise ValueError("Inference inputs or decode budgets differ")
-    requests = serving["rows"] + read(bench/"transitions.json")["rows"]
+    requests = [row for row in serving["rows"] if row.get("session")==run.name] + read(bench/"transitions.json")["rows"]
     records, broker = logs(run), lines(run/"broker.jsonl")
     epoch, embedded = embedded_points(records,broker,control,max(r["end_ns"] for r in requests),capture["warm_seconds"])
     standalone = mining_result(control,telemetry)
     native = mining_result(embedded,telemetry)
+    historical = read(Path(__file__).resolve().parents[1]/"direct-calibration.json")["calibration"]
+    calibration = [[dict(elapsed=0),dict(elapsed=historical["seconds"])] for _ in RANKS]
+    burst_epoch, burst = embedded_points(records,broker,calibration,last_request=0,warm=0)
+    early = mining_result(burst,telemetry)
     for field in ("accepted","rejected"):
         native[field] = [sum(e["event"]=="share" and e["accepted"]==(field=="accepted") and
             native["start_utc"]<=e["time"]<=native["end_utc"] for e in records[i]) for i in RANKS]
         a,b = (nearest(capture["samples"],standalone[k]) for k in ("start_utc","end_utc"))
         standalone[field] = [hi-lo for hi,lo in zip(b[field],a[field])]
     timing = timings(requests,broker,records)
+    releases = {row["epoch"]:row["monotonic_ns"] for row in broker if row["event"]=="native_release"}
+    parked = [(row["monotonic_ns"],releases[row["epoch"]+1]) for row in broker
+              if row["event"]=="native_drained" and row["epoch"]+1 in releases]
+    starts = [row["gpu_seen_ns"] for rank in records.values() for row in rank if row["event"]=="native_reentry"]
+    if any(begin <= tick < end for begin,end in parked for tick in starts):
+        raise ValueError("A K780 GPU re-entry overlapped exclusive serving ownership")
     stats = dict(mode="non-joined", k780_slice_tiles=188, idle_epoch=epoch, standalone_binary_sha256=capture["binary_sha256"],
                  standalone=standalone, embedded=native, embedded_pct_standalone=100*native["total_tmac_s"]/standalone["total_tmac_s"],
                  inference={s["mode"]:summary(s) for s in (joined,serving)}, paired_prompts=len(joined["rows"]),
-                 timing=timing, requests_for_timing=len(requests))
+                 timing=timing, requests_for_timing=len(requests), audited_serving_intervals=len(parked),
+                 direct_gpu_reentries_while_parked=0)
+    stats["non_joined_inference_sessions"] = sorted({row["session"] for row in serving["rows"]})
+    stats["preconditioning"] = {row["size"]:row["preconditioning"] for row in serving["rows"] if row.get("preconditioning")}
+    archived = read(Path(__file__).with_name("native")/"qualification.json")
+    stats["previous_long_context"] = [dict(input_tokens=row["input_tokens"],output_tokens=row["output_tokens"],
+        native_joined_decode_tps=row["decode_tps"], standalone_switch_decode_tps=row["previous_switch_decode_tps"])
+        for row in archived["historical"]]
+    stats["six_second_comparison"] = dict(historical_tmac_s=historical["total_tmac_s"],historical_seconds=historical["seconds"],
+        first_eligible_native_epoch=burst_epoch,embedded=early,embedded_pct_historical=100*early["total_tmac_s"]/historical["total_tmac_s"])
+    stats["activation"] = dict(run=live["run"], endpoint=live["endpoint"], port=live["port"], enabled=live["enabled"],
+        smokes=live["fresh_smokes"], cuda_graph_config=serving["profile"]["cuda_graph_config"],
+        stock_container=live["stock_container"], owners=len(live["ownership"]["gpu_processes"]),
+        ranks={rank:{"context_matches":row["context_matches"],"pearl_libraries":row["loaded_pearl_libraries"]}
+               for rank,row in live["ownership"]["ranks"].items()},
+        inference_gateway=live["inference_gateway"], cap_w=live["power_limit_w"], cutoff_c=live["peak_allowed_c"])
     write(out,stats)
     return stats
 
