@@ -55,7 +55,11 @@ docker compose -f "$u/compose.yaml" up -d
 
 For the eager public-input canary, start the watched, sliced workers and broker as described in the [prototype instructions](../../../work/pearl-inference-20261123/prototype/README.md). Set `PEARL_CONTROL_DIR` to its private directory containing `broker.sock`, and add `-f "$u/compose.pearl.yaml"` to the Compose invocation. Optionally set `PEARL_REPLAY_POOL_PORT` when a loopback Stratum test peer is listening **in the container's network namespace**. Without it the projection runs the fixed public job. Keep the proof-enabled port for public inputs only.
 
-## Measurements and remaining qualification
+## Full-checkpoint benchmark
+
+The four-GPU 1017 benchmark covers uncached prefill up to 524,177 tokens, sustained generation, concurrent requests, prefix reuse, and handoff to warm direct workers. The proof-enabled runs used public inputs and a private verifier. External pool credit and broad model quality still need independent evaluation. [Performance comparison](full-canary/performance.md) · [Benchmark configuration](full-canary/full-run.json)
+
+## Earlier component measurements
 
 On upstream, 39 independently verified submissions came from prefill, six-row target verification and one-row decode on GPU 3. The test loads the real FP8 checkpoint shard through the native weight loader. Ten alternating local stock/mining pairs under shared-GPU load measured 3.085/4.170 ms at 2,048 rows, 2.425/2.455 ms at six rows and 2.653/2.474 ms at one. All 117,760 sampled BF16 outputs matched the calibrated integer oracle. Relative L2 error against native FP8 was 3.36–3.69% on these activations. [Projection fixture](check_projection.py) · [Measurements](receipts/sm120-projection.json)
 
@@ -63,4 +67,4 @@ One public HTTP request to a two-layer DeepSeek TP1 canary on GPU 3 produced two
 
 A separate two-layer experiment put a real sliced direct worker and the serving process on GPU 2 together. All 48 warmed requests paused the worker, kept its cursor stationary through generation, then resumed it. HTTP send to observed drain took 4.07 ms median, 7.22 ms p95 and 17.90 ms maximum. Release to observed GPU execution took 2.11 ms median, 2.23 ms p95 and 2.25 ms maximum. Across 32 randomized pairs the within-pair increase in time to first streamed token was 0.34 ms median and 10.96 ms p95. Both experiments exercise real HTTP paths and use offline jobs. [Same-card measurements](receipts/sm120-http-same-gpu.json) · [Separate-device control](receipts/sm120-http-deepseek-handoff.json)
 
-A small deterministic model served known output over both the OpenAI and native HTTP endpoints on GPU 2. The separate historical four-worker handoff test measured warm p99 4.98 ms to drain and 2.83 ms to resume. Those measurements apply to their tested workloads. Full 1017 model output quality, speculative acceptance, four-card peak memory, start-to-first-token latency, idle throughput and external difficulty-weighted pool credit require a dedicated full-model run. [HTTP receipt](receipts/sm120-http-llama.json) · [Four-worker timings](../../../work/pearl-inference-20261123/prototype/miner/measurements.json)
+A small deterministic model served known output over both the OpenAI and native HTTP endpoints on GPU 2. The separate historical four-worker handoff test measured warm p99 4.98 ms to drain and 2.83 ms to resume. Those measurements apply to their tested workloads. [HTTP receipt](receipts/sm120-http-llama.json) · [Four-worker timings](../../../work/pearl-inference-20261123/prototype/miner/measurements.json)
