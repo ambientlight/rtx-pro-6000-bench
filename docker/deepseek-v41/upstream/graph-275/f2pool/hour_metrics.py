@@ -12,6 +12,7 @@ import time
 import urllib.request
 
 from workload import RejectRedirect, graph, scan_summary
+from idle_opportunities import measure as idle_opportunities
 
 RANKS = ("0", "1", "2", "3")
 HIST = {"time_to_first_token_seconds", "request_time_per_output_token_seconds",
@@ -22,7 +23,8 @@ COUNTERS = {"num_requests_total", "num_aborted_requests_total", "prompt_tokens_t
 GPUS = ("index", "temperature.gpu", "power.draw", "power.limit", "clocks.current.sm",
         "clocks.current.memory", "clocks_event_reasons_counters.sw_thermal_slowdown",
         "clocks_event_reasons_counters.hw_thermal_slowdown")
-BASE_RATE = json.loads((Path(__file__).resolve().parents[1]/"direct-calibration.json").read_text())["calibration"]["total_tmac_s"]
+DIRECT_CALIBRATION = json.loads((Path(__file__).resolve().parents[1]/"direct-calibration.json").read_text())["calibration"]
+BASE_RATE = DIRECT_CALIBRATION["total_tmac_s"]
 PHASE = ("submitted","accepted","rejected","unknown","accepted_expected_macs")
 IDLE = ("connected","submitted","accepted","rejected","unknown","accepted_work_macs","target","cooling","cooling_seconds")
 LOOPBACK = urllib.request.build_opener(urllib.request.ProxyHandler({}), RejectRedirect())
@@ -467,6 +469,7 @@ def summarize(folder, fleet_dir):
                     direct_mac_bounds=bounds,wall_tmac_s_bounds=[x/cursor_span/1e12 for x in bounds],
                     pct_of_pure_direct_over_wall_bounds=[100*x/cursor_span/1e12/BASE_RATE for x in bounds])
     section("idle_mining",direct)
+    section("continuously_free_direct",lambda:idle_opportunities(samples,start,end,fleet_dir,DIRECT_CALIBRATION))
     section("direct_pool_exact_window",lambda:direct_ledger(fleet_dir/"events.jsonl",start,end))
     section("handoff",lambda:handoffs(fleet_dir/"broker-events.jsonl",start,end,samples))
     if "handoff" in summary and "idle_mining" in summary:
