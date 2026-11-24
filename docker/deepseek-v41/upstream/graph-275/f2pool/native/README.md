@@ -2,7 +2,19 @@
 
 The four SM120 schedulers own the four CUDA contexts. Each scheduler loads the K780 Rust library and gives its mining thread the scheduler's existing context. Each idle thread replays a short 188-tile CUDA graph on a low-priority stream. A CPU broker closes admission to new mining slices and waits for the GPU completion event on each outstanding slice. After the last inference batch, all four ranks fence their streams and reopen the gate.
 
-During serving, layer zero's `attn.wo_b` computes both the projection consumed by DeepSeek and Pearl transcripts. This code runs inside the full DSPARK decode graph and eligible prefill calls. The idle K780 graphs are separate CUDA graphs in the same contexts. Direct and inference work have separate F2Pool connections. An independent local verifier checks a winning inference witness before forwarding it. That witness contains small numerical samples from the request. The owner enabled these submissions for the production endpoint.
+In `joined` mode, layer zero's `attn.wo_b` computes both the projection consumed by DeepSeek and Pearl transcripts. This code runs inside the full DSPARK decode graph and eligible prefill calls. Direct and inference work have separate F2Pool connections. An independent local verifier checks a winning inference witness before forwarding it. That witness contains small numerical samples from the request. The owner enabled these submissions for the production endpoint.
+
+In `non-joined` mode, prefill and decode use the checkpoint's original projection. Only the resident idle K780 threads perform mining. Both modes use the same scheduler admission, CUDA contexts, short idle graphs and post-inference release. Select the mode before starting the service so SGLang captures the corresponding inference graphs. On existing installations without a selection, startup uses `joined`.
+
+```sh
+runtime=/mnt/hot/ambientlight/sglang-sm120-runtime
+code="$runtime/native-production-code/docker/deepseek-v41/upstream/graph-275/f2pool"
+python3 "$code/native_service.py" set-mode non-joined
+systemctl --user restart dsv41-pearl.service
+cat "$runtime/native-production/current/ready.json"
+```
+
+Use `set-mode joined` in the same command to restore inference mining. The selection persists across service restarts.
 
 ## Serving and mining at 275 W per GPU
 
@@ -42,7 +54,7 @@ The serving source starts at official SGLang `c64f2256d583` (2026-11-23 16:00:36
 
 | Component | Parent | Native commit |
 |---|---|---|
-| SGLang | `a384e33a52d7` | `17d27a584c91` |
+| SGLang | `a384e33a52d7` | `8d301c518b1a` |
 | K780 Rust/CUDA miner | `c9bc83799ed2` | `cb4bcdd4cf34` |
 
 The following commands rebuild the native library in disposable checkouts on the prepared host. The installed source checkouts supply the bundle parents. The miner checkout also needs its pinned Pearl and CUTLASS submodules.

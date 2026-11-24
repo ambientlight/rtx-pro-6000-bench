@@ -9,6 +9,7 @@ import signal
 import socket
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import urllib.request
@@ -21,6 +22,7 @@ RELEASE = host.HOST / "native-production"
 UNIT = "dsv41-pearl"
 JOURNAL = host.HOST / "candidate-unpacked/rootfs/opt/content-free/journal_entrypoint.py"
 BASE = "http://127.0.0.1:8000"
+MODES = ("joined", "non-joined")
 
 
 def read(path):
@@ -40,11 +42,31 @@ def notify(message):
             sock.sendto(message.encode(), address.replace("@", "\0", 1) if address.startswith("@") else address)
 
 
-def fresh_session(control):
+def selected_mode():
+    try:
+        mode = (RELEASE / "serving-mode").read_text().strip()
+    except FileNotFoundError:
+        return "joined"  # Existing deployments predate the mode selector.
+    if mode not in MODES:
+        raise ValueError("Unknown Pearl serving mode")
+    return mode
+
+
+def set_mode(mode):
+    if mode not in MODES:
+        raise ValueError("Unknown Pearl serving mode")
+    with tempfile.NamedTemporaryFile("w", dir=RELEASE, prefix=".mode-", delete=False) as tmp:
+        tmp.write(mode + "\n")
+    os.replace(tmp.name, RELEASE / "serving-mode")
+
+
+def fresh_session(control, mode):
     config = read(RELEASE / "config.json")
     stage = read(RELEASE / "staged.json")
-    if digest(Path(config["library"])) != stage["library_sha256"] or digest(VERIFIER) != VERIFIER_SHA:
-        raise RuntimeError("Staged K780 library or proof verifier changed")
+    if digest(Path(config["library"])) != stage["library_sha256"]:
+        raise RuntimeError("Staged K780 library changed")
+    if mode == "joined" and digest(VERIFIER) != VERIFIER_SHA:
+        raise RuntimeError("Joined proof verifier changed")
     for rel, checksum in stage["source"].items():
         if digest(RELEASE / "pkg/sglang" / rel) != checksum:
             raise RuntimeError("Staged SGLang overlay changed")
@@ -52,10 +74,13 @@ def fresh_session(control):
     runs.mkdir(exist_ok=True)
     run = runs / (time.strftime("%Y%m%d-%H%M%S") + "-" + str(os.getpid()))
     run.mkdir()
-    for path in ("logs", "receipts", "serving", "serving/shapes"):
+    for path in ("logs", "serving"):
         (run / path).mkdir()
     (run / "pkg").symlink_to(RELEASE / "pkg", target_is_directory=True)
-    (run / "gateway-token").write_text(secrets.token_hex(32))
+    if mode == "joined":
+        (run / "serving/shapes").mkdir()
+        (run / "receipts").mkdir()
+        (run / "gateway-token").write_text(secrets.token_hex(32))
     config.update(permit=str(control / "idle.permit"), log_dir=str(run / "logs"))
     save(run / "config.json", config)
     tmp = RELEASE / "next"
@@ -63,6 +88,19 @@ def fresh_session(control):
     tmp.symlink_to(run, target_is_directory=True)
     tmp.replace(RELEASE / "current")
     return run
+
+
+def model_environment(run, sock, mode):
+    env = {key: value for key, value in os.environ.items() if not key.startswith("PEARL_")}
+    env.update(CANARY_PORT="8000", CANARY_REQUIRE_API_KEY="0", CANARY_CONTENT_FREE="1",
+               CANARY_STATE=str(run / "serving"), RAYON_NUM_THREADS="2",
+               PEARL_NATIVE_IDLE_CONFIG=str(run / "config.json"), PEARL_BROKER_SOCKET=str(sock))
+    if mode == "joined":
+        env.update(PEARL_SHAPE_DIR=str(run / "serving/shapes"), PEARL_PUBLIC_REPLAY="1",
+                   PEARL_WOB_MODULE="checkpoint_graph", PEARL_GRAPH_VERIFY="1", PEARL_GPU_PREPARE="1",
+                   PEARL_REPLAY_POOL_HOST="127.0.0.1", PEARL_REPLAY_POOL_PORT="31990",
+                   PEARL_REPLAY_GATEWAY_TOKEN_FILE=str(run / "gateway-token"))
+    return env
 
 
 def stock_status():
@@ -125,7 +163,9 @@ def serve():
     for sig in (signal.SIGINT, signal.SIGTERM):
         signal.signal(sig, lambda *_: stopping.set())
     control = Path(os.environ["RUNTIME_DIRECTORY"])
-    run = fresh_session(control)
+    mode = selected_mode()
+    joined = mode == "joined"
+    run = fresh_session(control, mode)
     children = {}
     try:
         host.check_artifacts()
@@ -139,15 +179,11 @@ def serve():
         launch(children, run, "broker", [host.PYTHON, host.PROTO / "broker.py", "--socket", sock,
                "--inference-only-ranks", "4", "--native-permit", control / "idle.permit",
                "--timeline", run / "broker.jsonl"])
-        launch(children, run, "gateway", [host.OLD / "env-run", HERE.with_name("gateway.py"),
-               "--model", MODEL, "--verifier", VERIFIER, "--token-file", token,
-               "--receipt", receipt, "--port", "31990", "--arm-file", arm, "--worker", "sglnativeverify"])
-        env = dict(os.environ, CANARY_PORT="8000", CANARY_REQUIRE_API_KEY="0", CANARY_CONTENT_FREE="1",
-                   CANARY_STATE=str(run / "serving"), PEARL_SHAPE_DIR=str(run / "serving/shapes"),
-                   PEARL_NATIVE_IDLE_CONFIG=str(run / "config.json"), PEARL_BROKER_SOCKET=str(sock),
-                   PEARL_PUBLIC_REPLAY="1", PEARL_WOB_MODULE="checkpoint_graph", PEARL_GRAPH_VERIFY="1",
-                   PEARL_GPU_PREPARE="1", PEARL_REPLAY_POOL_HOST="127.0.0.1", PEARL_REPLAY_POOL_PORT="31990",
-                   PEARL_REPLAY_GATEWAY_TOKEN_FILE=str(token), RAYON_NUM_THREADS="2")
+        if joined:
+            launch(children, run, "gateway", [host.OLD / "env-run", HERE.with_name("gateway.py"),
+                   "--model", MODEL, "--verifier", VERIFIER, "--token-file", token,
+                   "--receipt", receipt, "--port", "31990", "--arm-file", arm, "--worker", "sglnativeverify"])
+        env = model_environment(run, sock, mode)
         ready = False
         deadline = time.monotonic() + 15 * 60
         while not stopping.is_set():
@@ -157,9 +193,9 @@ def serve():
             save(run / "temperature.json", dict(time_ns=time.time_ns(), temperatures_c=temps))
             if max(temps) >= host.GPU_TEMP_CUTOFF_C:
                 raise RuntimeError("GPU reached the 92 C cutoff")
-            if "model" not in children and sock.exists() and receipt.exists():
-                # Each run has its own arm file. Winning inference proofs are authorized for production.
-                arm.touch(mode=0o600, exist_ok=False)
+            if "model" not in children and sock.exists() and (not joined or receipt.exists()):
+                if joined:
+                    arm.touch(mode=0o600, exist_ok=False)
                 launch(children, run, "model", [host.PYTHON, "-S", JOURNAL, "--", host.OLD / "env-run",
                        host.HERE, "launch-oci"], env)
                 notify("STATUS=Loading DeepSeek on four SM120 GPUs")
@@ -170,8 +206,8 @@ def serve():
                     if [x["id"] for x in json.load(response)["data"]] != ["deepseek-v4-flash"]:
                         raise RuntimeError("Unexpected production model")
                 save(run / "ready.json", dict(time_ns=time.time_ns(), smokes=list(host.SMOKES),
-                     port=8000, inference_proofs_enabled=arm.is_file()))
-                notify("READY=1\nSTATUS=DeepSeek TP4 with native Pearl and the F2Pool inference gateway")
+                     port=8000, mode=mode, inference_proofs_enabled=arm.is_file()))
+                notify(f"READY=1\nSTATUS=DeepSeek TP4 with native Pearl ({mode})")
                 ready = True
             if not ready and time.monotonic() >= deadline:
                 raise TimeoutError("Native production startup exceeded 15 minutes")
@@ -253,5 +289,12 @@ TimeoutStartSec=18min
 
 if __name__ == "__main__":
     cli = argparse.ArgumentParser(description=__doc__)
-    cli.add_argument("command", choices=("serve", "fallback", "install"))
-    {"serve": serve, "fallback": fallback, "install": install}[cli.parse_args().command]()
+    commands = cli.add_subparsers(dest="command", required=True)
+    for name in ("serve", "fallback", "install"):
+        commands.add_parser(name)
+    commands.add_parser("set-mode", help="Select the mode for the next service start").add_argument("mode", choices=MODES)
+    args = cli.parse_args()
+    if args.command == "set-mode":
+        set_mode(args.mode)
+    else:
+        {"serve": serve, "fallback": fallback, "install": install}[args.command]()

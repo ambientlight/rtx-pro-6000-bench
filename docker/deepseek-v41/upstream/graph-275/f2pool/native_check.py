@@ -57,20 +57,26 @@ def snapshot():
                 monotonic_ns=time.monotonic_ns())
 
 
-def owners(directory=RUN):
+def owners(directory=RUN, *, joined=True):
     data = {}
     for rank, events in logs(directory).items():
         rec = next(e for e in events if e["event"]=="native_rank")
         pid = rec["pid"]
         data[rank] = dict(pid=pid, context_matches=rec["thread_context"] == rec["borrowed_context"],
                           scheduler_receipt=(directory/"serving/shapes"/f"pearl-shapes-{pid}-tp{rank}.json").exists())
+        if not joined:
+            with Path(f"/proc/{pid}/maps").open() as maps:
+                libs = {Path(line.split()[-1]).name for line in maps if "/libpearl_" in line}
+            if "libpearl_idle.so" not in libs or libs & {"libpearl_wo_b.so", "libpearl_prepare.so", "libpearl_reference.so"}:
+                raise RuntimeError(f"Unexpected Pearl libraries in non-joined scheduler {rank}")
+            data[rank]["loaded_pearl_libraries"] = sorted(libs)
     raw=subprocess.check_output(["nvidia-smi","--query-compute-apps=pid,process_name,gpu_uuid",
                                  "--format=csv,noheader"],text=True)
     gpu=[dict(pid=int(pid),process=Path(name.strip()).name,gpu_uuid=uuid.strip())
          for pid,name,uuid in (line.split(", ",2) for line in raw.splitlines())]
     for rank,rec in data.items():
         match=[p for p in gpu if p["pid"]==rec["pid"] and "scheduler" in p["process"]]
-        if not (rec["context_matches"] and rec["scheduler_receipt"] and len(match)==1):
+        if not (rec["context_matches"] and rec["scheduler_receipt"] == joined and len(match)==1):
             raise RuntimeError(f"Could not attribute GPU work to serving rank {rank}")
     if len({p["gpu_uuid"] for p in gpu if p["pid"] in {r["pid"] for r in data.values()}})!=4 or any(p["process"]=="bpm" for p in gpu):
         raise RuntimeError("Unexpected GPU ownership")

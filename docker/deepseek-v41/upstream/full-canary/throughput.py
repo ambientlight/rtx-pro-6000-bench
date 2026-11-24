@@ -140,7 +140,7 @@ def native_decode_metrics(before, after, outputs):
     return dict(native_tpot_histogram_decode_tps=None, native_server_decode_tps=None, native_server_decode_source=None)
 
 
-def handbook(base, model, size, budget):
+def handbook(base, model, size, budget, *, cache_salt=None):
     # Exactly the September task generator, native chat-template calibration and sampling config.
     count = max(1, size // 100)
     for _ in range(5):
@@ -153,6 +153,8 @@ def handbook(base, model, size, budget):
         raise ValueError("historical prompt calibration failed")
     payload = dict(model=model, input=[{"role": "user", "content": prompt}], stream=True, store=False,
                    temperature=1.0, top_p=.95, max_output_tokens=budget, chat_template_kwargs={"thinking": False})
+    if cache_salt is not None:
+        payload["cache_salt"] = cache_salt
     metrics_before = server_histograms(base)
     counters_before = http_counters(base)
     first = terminal = final = None
