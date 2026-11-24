@@ -1,0 +1,49 @@
+#!/usr/bin/python3
+"""Run the exact staged OCI Python tree outside the privileged engine."""
+import json, os, sys
+from pathlib import Path
+
+experiment=Path(__file__).resolve().parent
+run=experiment.parent/"full-canary"
+code=experiment.parent/"graph-canary-code"
+root = run.parent / "candidate-unpacked/rootfs"
+site = root / "opt/sglang/lib/python3.12/site-packages"
+toolkit = Path("/mnt/hot/ambientlight/repos/mining/blackwell_pearl_miner-gpu0-tuning/target/gpu0-study/cuda134-root/usr/local/cuda-13.4")
+bench = run.parent / "deployment-source"
+settings = json.loads((bench / "docker/deepseek-v41/upstream/environment.json").read_text())
+env = {**os.environ, **settings}
+state=run/"state"
+key=state/"anthropic-canary.key"
+try:
+    fd=os.open(key,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600)
+except FileExistsError:
+    pass
+else:
+    with os.fdopen(fd,"wb") as fp:
+        fp.write(os.urandom(32))
+gpu_libs=[toolkit/"targets/x86_64-linux/lib", site/"nvidia/cu13/lib",site/"nvidia/cudnn/lib",site/"nvidia/nccl/lib", root/"usr/local/cuda-13.0/targets/x86_64-linux/lib"]
+artifact_run=Path(os.environ.get("CANARY_STATE", state)).resolve()
+artifact_run.mkdir(mode=0o700,parents=True,exist_ok=True)
+env.update(
+    MODEL_PATH="/mnt/hot/ambientlight/models/DeepSeek-V4.1-Flash-1017",
+    PEARL_CHECKPOINT_DIR="/mnt/hot/ambientlight/models/DeepSeek-V4.1-Flash-1017",
+    PEARL_OPERATOR_BUILD=str(code/"lib"),
+    SGLANG_ANTHROPIC_THINKING_KEY_FILE=str(key),SGLANG_LISTEN_ADDRESS="127.0.0.1",
+    STATE_PATH=str(artifact_run),DSV41_DIAGNOSTIC_ROOT=str(artifact_run/"diagnostics"),
+    CONTENT_FREE_LOG_DIR=str(artifact_run),CONTENT_FREE_LOGGING=os.environ.get("CANARY_CONTENT_FREE","1"),
+    SERVER_PORT=os.environ.get("CANARY_PORT","18000"),CANARY_OCI_SITE=str(site),
+    REQUIRE_API_KEY=os.environ.get("CANARY_REQUIRE_API_KEY",settings["REQUIRE_API_KEY"]),
+    PYTHONPATH=os.pathsep.join(map(str,[experiment/"pkg",code/"bench/work/pearl-inference-20261123/prototype",root/"opt/pearl",root/"opt/content-free",run/"relocated-site",site])),
+    CUDA_HOME=str(toolkit), CUDA_VISIBLE_DEVICES=os.environ.get("CANARY_GPU_DEVICES","0,1,2,3"),
+    CUDA_DEVICE_ORDER="PCI_BUS_ID",SGLANG_PLUGINS="no_plugins",SGLANG_SM120_FLASHMLA_BACKEND="flashinfer",
+    FLASHINFER_CUDA_ARCH_LIST="12.0f",OPENBLAS_NUM_THREADS="1",OMP_NUM_THREADS="2",MAX_JOBS="4",
+    TOKENIZERS_PARALLELISM="false",PYTHONUNBUFFERED="1",PYTHONNOUSERSITE="1",
+    CPATH=str(run/"math-headers"),
+    LD_LIBRARY_PATH=os.pathsep.join(map(str,gpu_libs)),
+    PATH=os.pathsep.join(map(str,[run/"bin",toolkit/"bin",site/"nvidia/cu13/bin",root/"opt/sglang/bin",os.environ["PATH"]])))
+py=root/"opt/python/cpython-3.12.16-linux-x86_64-gnu/bin/python3.12"
+args=sys.argv[1:]
+if args and args[0] in ("run","health","smoke","prepare","args"):
+    boot=experiment/"boot/boot.py"
+    args=[str(boot),*args]
+os.execve(py,[str(py),*args],env)

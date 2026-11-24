@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+set -eu
+r=/mnt/hot/ambientlight/sglang-sm120-runtime
+d="$r/graph-production-275"
+q="$r/deployment-source/docker/deepseek-v41/upstream/full-canary"
+python3 "$d/fleet/miners.py" status | python3 -c 'import json,sys; d=json.load(sys.stdin); assert len(d["workers"])==4 and all(w["holds"] and w["watched"] and not w["gpu_busy"] for w in d["workers"])'
+CANARY_API_KEY_FILE="$d/arms/joined/api-key" PYTHONPATH="$q" python3 -c 'from qualify import http_counters; assert http_counters("http://127.0.0.1:18001")["active"] == 0'
+run=$(cat "$d/fleet/current-run.txt")
+target=$(python3 -c 'import json,sys; t=json.load(open(sys.argv[1]))["target"];assert int(t,16)==2**208;print(t)' "$run/peer/job.json")
+# The four model ranks reconnect to the same port. Separate files retain both targets.
+systemctl --user stop dsv41-graph275-peer.service
+systemd-run --user --collect --unit=dsv41-graph275-equal-peer --property=KillMode=control-group --property=StandardOutput=append:"$d/logs/equal-peer.log" --property=StandardError=append:"$d/logs/equal-peer.log" "$d/env-run" "$q/public_pool.py" --port 31989 --sustained --share-target "$target" --model /mnt/hot/ambientlight/models/DeepSeek-V4.1-Flash-1017 --verifier /mnt/hot/ambientlight/repos/mining/blackwell_pearl_miner-v1/target/v1-build/release/examples/verify_receipt --receipt "$d/receipts/inference-equal-peer.json" --accepted-log "$d/receipts/inference-equal-acks.jsonl"

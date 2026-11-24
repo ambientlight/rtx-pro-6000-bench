@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+set -eu
+d=$(cd "$(dirname "$0")" && pwd)
+for u in dsv41-graph275-restore.timer dsv41-graph275-peer.service dsv41-pearl-graph275-miners.service; do systemctl --user is-active --quiet "$u"; done
+python3 "$d/fleet/miners.py" status | python3 -c 'import json,sys; d=json.load(sys.stdin); assert len(d["workers"])==4 and all(w["holds"] and w["watched"] and not w["gpu_busy"] for w in d["workers"])'
+systemctl --user restart dsv41-graph275-restore.timer
+systemctl --user stop dsv41-graph275-candidate.service
+for i in $(seq 1 50); do
+ if [[ $(systemctl --user show -p LoadState --value dsv41-graph275-candidate.service) == not-found ]]; then break; fi
+ sleep .2
+done
+"$d/launch-model" joined

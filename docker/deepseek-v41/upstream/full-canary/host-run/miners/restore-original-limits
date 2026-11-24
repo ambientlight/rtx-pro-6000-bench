@@ -1,0 +1,21 @@
+#!/usr/bin/python3
+"""Restore the four documented NVIDIA limits lost at dsv41 container restart."""
+import subprocess
+from check_restored_limits import inspect
+
+def main():
+    state=inspect()
+    if not state["namespace_present"] or state["original_container_state"] != "running":
+        raise SystemExit("Original DeepSeek container must be running")
+    if not all(r.get("actual_hard_mib") in ("max", 96316) and
+               r["expected_hard_mib"] == 96316 and r["used_mib"] <= 96316 for r in state["rows"]):
+        raise SystemExit("Actual usage or policy differs from preflight; inspect before changing limits")
+    for row in state["rows"]:
+        if row["actual_hard_mib"] != row["expected_hard_mib"]:
+            subprocess.run(["sudo","/usr/bin/nvidia-smi","memory-limits","-n",state["cgroup"],
+                            "-i",row["uuid"],"--hard-limit",str(row["expected_hard_mib"])],check=True)
+    if not inspect()["prior_policy_met"]:
+        raise SystemExit("Four expected limits not verified after writes")
+    print("Confirmed original limit of 96,316 MiB on all four GPUs")
+
+if __name__=="__main__": main()

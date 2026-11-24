@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+set -eu
+d=$(cd "$(dirname "$0")" && pwd)
+python3 - "$d" <<'PY'
+import json,sys,subprocess,time
+from pathlib import Path
+r=Path(sys.argv[1]);t=r/'receipts/joined-equal-target-fixed-period.json';end=time.monotonic()+160
+while time.monotonic()<end:
+ try:
+  trace=json.loads(t.read_text()); closed=subprocess.run(['systemctl','--user','is-active','--quiet','dsv41-pearl-graph275-observer.service']).returncode!=0
+  if trace['complete'] and closed:
+   snap=json.loads(subprocess.check_output([sys.executable,str(r/'fleet/miners.py'),'status']));assert len(snap['workers'])==4 and all(w['holds'] and not w['gpu_busy'] for w in snap['workers']);break
+ except (OSError,ValueError,AssertionError):pass
+ time.sleep(.4)
+else:raise SystemExit('test-ended and parked signal not yet received')
+PY
+systemctl --user restart dsv41-graph275-restore.timer
+date +%s%N >"$d/receipts/original-restart-ns"
+"$d/restore-original"
+python3 "$d/verify-restored.py"

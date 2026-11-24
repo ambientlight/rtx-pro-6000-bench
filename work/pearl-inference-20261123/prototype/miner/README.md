@@ -4,6 +4,15 @@ The prototype builds the deployed miner revision `157ca8bb` with a second K780 l
 
 ## Build and run
 
+The local miner branch `sm120/pearl-graph-275-miner` pins the complete source used by the 275 W joined comparison at `c9bc83799ed211cad5d40f37430d9c9e9c361210`. Its eight modified files and the new `src/handoff.rs` match the benchmarked checkout byte for byte. The Pearl submodule is pinned at `82e6eee7076aafe10123e08db78f100d270c0582`. The two recorded SHA-256 hashes identify the miner and verifier executables that actually ran. [Measurement setup](../../../../docker/deepseek-v41/upstream/graph-275/measurement-setup.json)
+
+To inspect the committed source in a fresh directory, set `miner_repo` to the local miner repository and `new_checkout` to an unused path.
+
+```bash
+git -C "$miner_repo" worktree add --detach "$new_checkout" c9bc83799ed211cad5d40f37430d9c9e9c361210
+git -C "$new_checkout" submodule update --init --recursive
+```
+
 Set `CUDA_HOME` to a CUDA 13.4 toolkit, with Rust 1.97.0 available. Give `build.sh` the local miner repository and a new checkout directory. It creates a detached worktree, checks out the pinned submodules and applies [the slice and control changes](sliced-worker.patch). The resulting Linux executable is `target/release/bpm`. [Build script](build.sh)
 
 On this rig the built executable is `/mnt/hot/ambientlight/repos/mining/blackwell_pearl_miner-sglang-prototype/target/cargo/release/bpm` and the CUDA 13.4 toolkit is `/mnt/hot/ambientlight/repos/mining/blackwell_pearl_miner-gpu0-tuning/target/gpu0-study/cuda134-root/usr/local/cuda-13.4`.
@@ -51,3 +60,13 @@ The single-card width sweep used 300 randomized arrivals and three alternating t
 Doubling from 188 to 376 gained 0.28 percentage points in this sweep and doubled the measured p99 wait. The earlier four-pair measurement of 188 varied by more than that gain. The four-GPU reference remains at 188 tiles.
 
 The fork adds Linux-only prototype control and defaults to the deployed v1 kernel in sliced mode. In a production rollout, a supervisor must reconcile serving demand before starting workers or restarting a failed controller. The recorded handoff includes warm local jobs and simulated scheduler messages. Read [the measured results](measurements.json) before assigning latency guarantees.
+
+The benchmark branch also carries an incremental Git bundle for verifying the exact miner commit in another checkout of the pinned base. Fetching the bundle into an isolated repository leaves the measured worktree available. [Direct-miner bundle](../../../../docker/deepseek-v41/upstream/graph-275/direct-miner.bundle)
+
+```sh
+# Run from the benchmark checkout. MINER_CHECKOUT contains the pinned base.
+bundle="$PWD/docker/deepseek-v41/upstream/graph-275/direct-miner.bundle"
+git -C "$MINER_CHECKOUT" bundle verify "$bundle"
+git -C "$MINER_CHECKOUT" fetch "$bundle" refs/heads/sm120/pearl-graph-275-miner
+git -C "$MINER_CHECKOUT" rev-parse FETCH_HEAD
+```

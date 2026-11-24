@@ -20,7 +20,7 @@ mkdir -p "$OUT"
 python3 "$OUT/sglang/test/manual/test_pearl_graph_hooks.py"
 ```
 
-For an offline source restore, pass a local Git checkout containing base `481e8e66504cb680ccb1316eaf01ba09b03da5cd` as the second argument to `restore-source.sh`. Staging verifies the two original SGLang modules against the pinned base, copies the complete installed package, replaces those modules and patches a private copy of the checkpoint launcher. The candidate runtime supplies the native SM120 serving dependencies. [Staging script](stage-runtime.sh) · [Launcher change](boot-graph.patch)
+For an offline source restore, pass a local Git checkout containing base `481e8e66504cb680ccb1316eaf01ba09b03da5cd` as the second argument to `restore-source.sh`. Staging verifies the two original SGLang modules against the pinned base, copies the complete installed package, replaces those modules and patches a private copy of the checkpoint launcher. The candidate runtime supplies the native SM120 serving dependencies. The staged launcher uses the tested private YAML configuration for authentication and verifies the launcher and helper digests. [Staging script](stage-runtime.sh) · [Launcher change](boot-graph.patch) · [Host harness and CPU verification](host-run/README.md)
 
 ## Run the projection fixture
 

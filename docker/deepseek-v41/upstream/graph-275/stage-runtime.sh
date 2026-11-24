@@ -23,3 +23,5 @@ for path in "${files[@]}"; do
 done
 cp "$here/../boot.py" "$here/../checkpoint.json" "$dest/boot/"
 patch --quiet --directory="$dest/boot" -p1 --input="$here/boot-graph.patch"
+cp "$here/../full-canary/host-run/protected_launch.py" "$dest/boot/"
+(cd "$dest" && sha256sum --check "$here/staged-launcher.sha256")
