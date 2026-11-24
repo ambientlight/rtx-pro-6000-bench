@@ -258,6 +258,35 @@ def thermal(samples):
     return out
 
 
+def prefill_bounds(before, after, result):
+    # Both layouts cover exactly 5120*2048 MACs per physical activation row;
+    # splitting a logical singleton into two adds exactly one physical row.
+    full = result["reconciled_mac_equivalent"].get("prefill")
+    if full is not None:
+        return [full,full]
+    bound = [0,0]
+    for r in RANKS:
+        raw=result["tickets"]["prefill"][r]
+        lo,hi=raw*65_536,raw*262_144
+        record=result["rank_verifier_delta"][r]
+        jobs,scan=record.get("prefill_jobs",{}),record.get("prefill_scan",{})
+        calls=jobs.get("mined_calls",0)
+        if (not graph.pending_scans(before) and not graph.pending_scans(after)
+                and scan.get("verified_steps",0)==calls and not scan.get("verification_errors")):
+            def singletons(doc):
+                return sum(row["calls"] for row in doc["shapes"][r] if row["mode"]=="EXTEND"
+                           and row["path"]=="eager_wo_b" and row["real_rows"] % 2)
+            extras=singletons(after)-singletons(before)
+            rows=jobs.get("mined_rows",0)
+            tight_lo=max(lo,rows*5120*2048)
+            tight_hi=min(hi,(rows+min(calls,extras))*5120*2048)
+            if tight_lo <= tight_hi:
+                lo,hi=tight_lo,tight_hi
+        bound[0]+=lo
+        bound[1]+=hi
+    return bound
+
+
 def direct_ledger(path, start, end):
     by_rank = [{k:0 for k in ("submitted","accepted","rejected","unknown","accepted_work_macs")} for _ in RANKS]
     seen = set()
@@ -302,7 +331,7 @@ def summarize(folder, fleet_dir):
     def mining():
         graphs=graph.graph_deltas(first["server"],last["server"])
         work=scan_summary(first["projection"],last["projection"],graphs)
-        return {**work,"prefill_mac_bounds_from_verified_tickets":[sum(work["tickets"]["prefill"].values())*n for n in (65_536,262_144)]}
+        return {**work,"prefill_mac_bounds":prefill_bounds(first["projection"],last["projection"],work)}
     section("joined_work",mining)
     def upstream():
         a,b=first["gateway"],last["gateway"]
@@ -370,6 +399,17 @@ def summarize(folder, fleet_dir):
         j["broker_serving_s"]=active
         if active>0:
             j["pct_of_historical_direct_rate_during_broker_serving"]={p:100*n/active/1e12/BASE_RATE for p,n in j["reconciled_mac_equivalent"].items()}
+    if "joined_work" in summary:
+        # A bound using the actual targets sampled at the gateway. The estimator
+        # assumes random tickets and immediate preparation of the corresponding job.
+        targets = [int(s["gateway"]["target"],16) for s in samples if s.get("gateway",{}).get("target")]
+        if targets:
+            work = summary["joined_work"]
+            decode = sum(work["tickets"]["decode"].values())*65_536
+            macs = [decode + x for x in work["prefill_mac_bounds"]]
+            lam = [x*(target+1)/(1<<256) for x,target in zip(macs,(min(targets),max(targets)))]
+            work["expected_shares_at_hardest_and_easiest_sampled_targets"] = lam
+            work["p_at_least_one_estimate_range"] = [-math.expm1(-v) for v in lam]
     section("gpu",lambda:thermal(samples))
     return summary
 
