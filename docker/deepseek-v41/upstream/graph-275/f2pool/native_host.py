@@ -15,7 +15,7 @@ from native_report import TILES_PER_NONCE
 FILES = ("srt/pearl_runtime.py", "srt/pearl_native_idle.py", "srt/managers/scheduler.py")
 BASE_SGLANG = "a384e33a52d7bac3e7fac1b0ad24ce9bd4a9f4da"
 MODEL = Path("/mnt/hot/ambientlight/models/DeepSeek-V4.1-Flash-1017")
-DEFAULT_SLICE_TILES = 3008
+DEFAULT_SLICE_TILES = 12_032
 VERIFIER = Path("/mnt/hot/ambientlight/repos/mining/blackwell_pearl_miner-sglang-prototype/target/cargo/release/examples/verify_receipt")
 
 

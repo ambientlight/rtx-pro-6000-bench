@@ -1,6 +1,6 @@
 # DeepSeek TP4 with Pearl inside SGLang
 
-The four SM120 schedulers own the four CUDA contexts. Each scheduler loads the K780 Rust library and gives its mining thread the scheduler's existing context. Each idle thread runs one CUDA graph at a time on a low-priority stream. The 3,008-tile default covers a 26,112-tile nonce in nine graphs. When inference arrives, the CPU broker stops new mining slices and waits for the outstanding graph on each GPU. After the last inference batch, all four ranks fence their streams and reopen the gate.
+The four SM120 schedulers own the four CUDA contexts. Each scheduler loads the K780 Rust library and gives its mining thread the scheduler's existing context. Each idle thread runs one CUDA graph at a time on a low-priority stream. The 12,032-tile default covers a 26,112-tile nonce in three graphs, two of 12,032 tiles and one of 2,048. When inference arrives, the CPU broker stops new mining slices and waits for the outstanding graph on each GPU. After the last inference batch, all four ranks fence their streams and reopen the gate.
 
 In `joined` mode, layer zero's `attn.wo_b` computes both the projection consumed by DeepSeek and Pearl transcripts. This code runs inside the full DSPARK decode graph and eligible prefill calls. Direct and inference work have separate F2Pool connections. An independent local verifier checks a winning inference witness before forwarding it. That witness contains small numerical samples from the request. The owner enabled these submissions for the production endpoint.
 
