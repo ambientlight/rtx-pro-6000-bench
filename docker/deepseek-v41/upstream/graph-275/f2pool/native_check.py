@@ -21,8 +21,8 @@ def rows(path):
         return [json.loads(line) for line in f if line.endswith("\n")]
 
 
-def logs():
-    return {int(path.name.split("-")[1]): rows(path) for path in sorted((RUN/"logs").glob("native-*.jsonl"))}
+def logs(directory=RUN):
+    return {int(path.name.split("-")[1]): rows(path) for path in sorted((directory/"logs").glob("native-*.jsonl"))}
 
 
 def wait(fn, seconds, what):
@@ -57,13 +57,13 @@ def snapshot():
                 monotonic_ns=time.monotonic_ns())
 
 
-def owners():
+def owners(directory=RUN):
     data = {}
-    for rank, events in logs().items():
+    for rank, events in logs(directory).items():
         rec = next(e for e in events if e["event"]=="native_rank")
         pid = rec["pid"]
         data[rank] = dict(pid=pid, context_matches=rec["thread_context"] == rec["borrowed_context"],
-                          scheduler_receipt=(host.STATE/"shapes"/f"pearl-shapes-{pid}-tp{rank}.json").exists())
+                          scheduler_receipt=(directory/"serving/shapes"/f"pearl-shapes-{pid}-tp{rank}.json").exists())
     raw=subprocess.check_output(["nvidia-smi","--query-compute-apps=pid,process_name,gpu_uuid",
                                  "--format=csv,noheader"],text=True)
     gpu=[dict(pid=int(pid),process=Path(name.strip()).name,gpu_uuid=uuid.strip())

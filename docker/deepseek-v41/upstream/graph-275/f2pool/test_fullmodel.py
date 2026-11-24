@@ -12,6 +12,18 @@ import fullmodel as m
 
 
 class FullModelTest(unittest.TestCase):
+    def test_queued_trial_recovery_defers_to_completed_promotion(self):
+        with tempfile.TemporaryDirectory() as directory, patch.object(m, 'STATE', Path(directory)), \
+             patch.object(m, 'NATIVE_CONFIG', '/private/config.json'), patch.object(m, 'active', return_value=True), \
+             patch.object(m, 'run', return_value='enabled') as commands:
+            (m.STATE/'cutover.json').touch()
+            m.promote()
+            self.assertTrue((m.STATE/'promoted.json').is_file())
+            commands.assert_any_call('systemctl','--user','start','--no-block','dsv41-pearl.service')
+            commands.reset_mock()
+            m.restore()
+            commands.assert_not_called()
+
     def test_thermal_cutoff_starts_independent_restore(self):
         with tempfile.TemporaryDirectory() as directory, patch.object(m, 'STATE', Path(directory)):
             with patch.object(m,'cards',side_effect=[[88,89,90,91], [75,92,70,71]]), \

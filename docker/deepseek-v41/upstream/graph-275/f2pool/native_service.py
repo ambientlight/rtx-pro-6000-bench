@@ -66,7 +66,23 @@ def fresh_session(control):
 
 
 def stock_status():
-    return host.run(*host.DOCKER, "inspect", "-f", "{{.State.Status}}", "dsv41")
+    deadline = time.monotonic() + 90
+    while True:
+        try:
+            return host.run(*host.DOCKER, "inspect", "-f", "{{.State.Status}}", "dsv41")
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+            # The user manager can start before Docker and its restricted operator socket.
+            if time.monotonic() >= deadline:
+                raise
+            time.sleep(2)
+
+
+def stock_available():
+    try:
+        with urllib.request.urlopen(BASE + "/v1/models", timeout=3) as response:
+            return [row["id"] for row in json.load(response)["data"]] == ["deepseek-v4-flash"]
+    except (OSError, ValueError):
+        return False
 
 
 def exclusive_devices():
@@ -74,7 +90,10 @@ def exclusive_devices():
     if legacy not in ("failed", "inactive"):
         host.run("sudo", "-n", "/usr/bin/systemctl", "stop", "pearl-f2pool.service", timeout=120)
     if stock_status() == "running":
-        host.ensure_idle()
+        # A stock instance can still be loading when a private cutover guard starts it.
+        # Check active traffic if the stock API is already accepting requests.
+        if stock_available():
+            host.ensure_idle()
         host.run(*host.DOCKER, "stop", "dsv41", timeout=120)
     owners = host.run("nvidia-smi", "--query-compute-apps=pid,process_name", "--format=csv,noheader")
     if owners:
@@ -167,17 +186,25 @@ def serve():
 
 def fallback():
     # systemd orders this after the native unit and drains its cgroup first.
+    started_ns = time.time_ns()
     if (RELEASE / "current").exists():
-        save(RELEASE / "current/fallback.json", dict(time_ns=time.time_ns()))
-    host.run(*host.DOCKER, "start", "dsv41", timeout=120)
+        save(RELEASE / "current/fallback.json", dict(start_ns=started_ns))
+    was_running = stock_status() == "running"
+    if not was_running:
+        try:
+            host.run(*host.DOCKER, "start", "dsv41", timeout=120)
+        except subprocess.CalledProcessError:
+            # The restricted Docker helper may decline a concurrent second start.
+            if stock_status() != "running":
+                raise
     deadline = time.monotonic() + 15 * 60
     while time.monotonic() < deadline:
-        try:
-            with urllib.request.urlopen(BASE + "/v1/models", timeout=3) as reply:
-                if [x["id"] for x in json.load(reply)["data"]] == ["deepseek-v4-flash"] and stock_status() == "running":
-                    return
-        except OSError:
-            pass
+        smokes = [host.ORIGINAL / name for name in host.SMOKES]
+        if (stock_available() and stock_status() == "running" and
+                all(p.is_file() and (was_running or p.stat().st_mtime_ns >= started_ns) for p in smokes)):
+            if (RELEASE / "current").exists():
+                save(RELEASE / "current/fallback.json", dict(start_ns=started_ns, verified_ns=time.time_ns()))
+            return
         time.sleep(2)
     raise TimeoutError("Stock model failed to return on port 8000")
 

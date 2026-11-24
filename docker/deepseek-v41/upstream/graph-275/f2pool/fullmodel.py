@@ -275,7 +275,7 @@ def restore():
         raise RuntimeError('No private full-model cutover to restore')
     with (STATE/'cutover.lock').open('a') as lock:
         fcntl.flock(lock,fcntl.LOCK_EX)
-        if (STATE/'restored.json').exists():
+        if (STATE/'restored.json').exists() or (STATE/'promoted.json').exists():
             return
         for name in (SAMPLER,CANDIDATE,GATEWAY,BROKER,GUARD):
             if active(name):
@@ -297,13 +297,40 @@ def restore():
         print('Original DeepSeek restored and verified',flush=True)
 
 
+def promote():
+    """Hand an active private native run to the enabled production service."""
+    if not NATIVE_CONFIG or not (STATE/'cutover.json').is_file():
+        raise RuntimeError('Expected a native qualification run')
+    if run('systemctl','--user','is-enabled','dsv41-pearl.service') != 'enabled':
+        raise RuntimeError('Install the production service and fallback first')
+    with (STATE/'cutover.lock').open('a') as lock:
+        fcntl.flock(lock,fcntl.LOCK_EX)
+        if (STATE/'promoted.json').exists():
+            return
+        if not active(CANDIDATE) or (STATE/'restart.json').exists() or (STATE/'guard.json').exists():
+            raise RuntimeError('The qualification service is no longer eligible for promotion')
+        try:
+            for name in (CANDIDATE,GATEWAY,BROKER,GUARD,'dsv41-native-observer'):
+                if active(name):
+                    run('systemctl','--user','stop',name,timeout=130)
+            run('systemctl','--user','start','--no-block','dsv41-pearl.service')
+            # A stopping private model may queue OnFailure. The restore handler takes
+            # this same lock before reading the handoff marker. Production owns fallback now.
+            write('promoted.json',{'requested_ns':time.time_ns(),'unit':'dsv41-pearl.service'})
+        except BaseException:
+            run('systemctl','--user','start','--no-block',RESTORE+'.service')
+            raise
+        if active(RESTORE+'.timer'):
+            run('systemctl','--user','stop',RESTORE+'.timer')
+
+
 def main():
     cli = argparse.ArgumentParser(description=__doc__)
     sub=cli.add_subparsers(dest='command',required=True)
     create=sub.add_parser('start')
     create.add_argument('--token-file',type=Path,required=True)
     create.add_argument('--window-minutes',type=int,default=30)
-    for cmd in ('status','restore','verify','guard','launch-oci','renew'):
+    for cmd in ('status','restore','verify','guard','launch-oci','renew','promote'):
         sub.add_parser(cmd)
     args=cli.parse_args()
     if args.command=='start':
@@ -314,6 +341,8 @@ def main():
         guard()
     elif args.command=='restore':
         restore()
+    elif args.command=='promote':
+        promote()
     elif args.command=='verify':
         verify()
     elif args.command=='renew':

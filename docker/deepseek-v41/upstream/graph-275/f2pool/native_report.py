@@ -1,6 +1,7 @@
 """Reduce the native run to aggregate, source-attributed verification and timing evidence."""
 import argparse
 import csv
+from datetime import datetime
 import json
 import math
 from pathlib import Path
@@ -70,7 +71,10 @@ def idle_rate(events, broker, cutoff):
         if common<=0:
             continue
         rates=[(p[-1]["tiles"]-p[0]["tiles"])*TILE_MACS/(p[-1]["monotonic_ns"]-p[0]["monotonic_ns"])/1e3 for p in points]
-        candidates.append(dict(common_seconds=common,tmac_s_by_rank=rates,total_tmac_s=sum(rates)))
+        candidates.append(dict(epoch=epoch, common_seconds=common,
+                               start_utc_epoch=max(p[0]["time"] for p in points),
+                               end_utc_epoch=min(p[-1]["time"] for p in points),
+                               tmac_s_by_rank=rates,total_tmac_s=sum(rates)))
     return max(candidates,key=lambda c:c["common_seconds"]) if candidates else None
 
 
@@ -116,6 +120,87 @@ def timings(requests, broker, events):
     return {k:quantiles(v) for k,v in measures.items()}
 
 
+def idle_hardware(rows, idle):
+    samples = {i:[] for i in RANKS}
+    for row in rows:
+        if len(row) != 7:
+            continue
+        when = datetime.strptime(row[0], "%Y/%m/%d %H:%M:%S.%f").timestamp()
+        if idle["start_utc_epoch"] <= when <= idle["end_utc_epoch"]:
+            samples[int(row[1])].append(list(map(float, row[2:])))
+    if any(len(values) < 2 for values in samples.values()):
+        return None
+    return {rank:dict(samples=len(values),mean_util_pct=statistics.mean(v[0] for v in values),
+                      max_temp_c=max(v[1] for v in values),mean_power_w=statistics.mean(v[2] for v in values),
+                      sw_thermal_counter_us=values[-1][3]-values[0][3],
+                      hw_thermal_counter_us=values[-1][4]-values[0][4]) for rank,values in samples.items()}
+
+
+def paired_summary(rows):
+    held = {r["index"]:r for r in rows if r["mode"] == "held"}
+    enabled = {r["index"]:r for r in rows if r["mode"] == "enabled"}
+    if not held or len(rows) != 2*len(held) or held.keys() != enabled.keys():
+        raise ValueError("Incomplete native idle comparison")
+    changes = []
+    for i,a in held.items():
+        b = enabled[i]
+        if (a["prompt_sha256"] != b["prompt_sha256"] or a["budget"] != b["budget"]
+                or a["cached_tokens"] != 0 or b["cached_tokens"] != 0):
+            raise ValueError("Warm or unmatched native idle comparison")
+        changes.append(100 * (b["client_decode_tps"]/a["client_decode_tps"] - 1))
+    return dict(pairs=len(held), median_pair_decode_change_pct=statistics.median(changes),
+                range_pair_decode_change_pct=[min(changes),max(changes)],
+                output_hash_matches=sum(a["output_sha256"] == enabled[i]["output_sha256"] for i,a in held.items()),
+                arms={name:{k:statistics.median(r[k] for r in group.values())
+                            for k in ("client_decode_tps","ttft_ms")} for name,group in (("held",held),("enabled",enabled))})
+
+
+def phase_summary(rows, baseline):
+    phases = {}
+    for phase in ("prefill","decode"):
+        seconds = sum(r["seconds"][phase] for r in rows)
+        macs = [sum(r["mac_equivalent"][phase][i] for r in rows) for i in (0,1)]
+        rates = [n/seconds/1e12 for n in macs]
+        phases[phase] = dict(seconds=seconds, mac_equivalent=macs, tmac_s=rates,
+                             pct_of_standalone=[v*100/baseline for v in rates],
+                             tickets=sum(r["scanned_tickets"][phase] for r in rows))
+    return dict(requests=len(rows), work=phases,
+                serving=[dict(input_range=[min(r["input_tokens"] for r in group),max(r["input_tokens"] for r in group)],
+                              requests=len(group), **{k:statistics.median(r[k] for r in group) for k in
+                                      ("server_prefill_tps","client_decode_tps","ttft_ms")})
+                         for group in ([r for r in rows if r["input_tokens"] < 2048],
+                                       [r for r in rows if r["input_tokens"] >= 2048]) if group])
+
+
+def historical(run, graph_dir, baseline):
+    from workload import scan_summary
+    from hour_metrics import prefill_bounds
+
+    doc = read(run/"handbook.json")
+    old = [read(graph_dir/"measurements"/name)["runs"] for name in ("switch-handbook.json","joined-handbook.json")]
+    if not doc["complete"]:
+        raise ValueError("Historical replay incomplete")
+    rows = []
+    for row, control, previous in zip(doc["runs"], *old, strict=True):
+        if any(row["prompt_sha256"] != other["prompt_sha256"] or row["output_budget"] != other["output_budget"]
+               or other["cached_tokens"] != 0 for other in (row, control, previous)):
+            raise ValueError("Unmatched historical replay")
+        a,b = row["projection_before"],row["projection_after"]
+        work = scan_summary(a,b,row["graph_delta_by_rank"])
+        bounds = prefill_bounds(a,b,work)
+        decode = work["reconciled_mac_equivalent"]["decode"]
+        rows.append(dict(input_tokens=row["input_tokens"], output_tokens=row["output_tokens"],
+                         effective_prefill_tps=row["client_effective_prefill_tps"], ttft_s=row["ttft_s"],
+                         decode_tps=row["client_decode_tps"], previous_switch_decode_tps=control["client_decode_tps"],
+                         previous_joined_decode_tps=previous["client_decode_tps"], previous_switch_ttft_s=control["ttft_s"],
+                         previous_joined_ttft_s=previous["ttft_s"],
+                         decode_delta_pct=100*(row["client_decode_tps"]/control["client_decode_tps"]-1),
+                         prompt_sha256=row["prompt_sha256"],
+                         prefill_pct_of_standalone=[100*v/1e12/row["ttft_s"]/baseline for v in bounds],
+                         decode_pct_of_standalone=100*decode/1e12/(row["e2e_s"]-row["ttft_s"])/baseline))
+    return rows
+
+
 def report(run):
     stock=read(run/"stock.json")["rows"]
     joined=read(run/"native.json")["rows"]
@@ -132,12 +217,33 @@ def report(run):
     setup=[r["gpu_setup_us"]/1000 for es in events.values() for r in es if r["event"]=="native_job"]
     power_rows=list(csv.reader((run/"gpu.csv").read_text().splitlines(),skipinitialspace=True))
     temps={i:max(int(r[3]) for r in power_rows if len(r)==7 and int(r[1])==i) for i in RANKS}
+    graph_dir=Path(__file__).resolve().parents[1]
+    baseline=read(graph_dir/"direct-calibration.json")["calibration"]
+    last=max(row["monotonic_ns"] for batch in events.values() for row in batch if row["event"]=="native_work")
+    sustained=idle_rate(events,broker,last)
+    sustained["pct_of_standalone"]=100*sustained["total_tmac_s"]/baseline["total_tmac_s"]
+    sustained["hardware"]=idle_hardware(power_rows,sustained)
+    additional={}
+    for filename,key in (("proof-check","independent_verification"),("overlap","concurrent_disconnect")):
+        if (run/(filename+".json")).exists():
+            additional[key]=read(run/(filename+".json"))
+    if (run/"paired.json").exists():
+        additional["same_build"]=paired_summary(read(run/"paired.json")["rows"])
+    if (run/"phases.json").exists():
+        additional["phase_benchmark"]=phase_summary(read(run/"phases.json")["rows"],baseline["total_tmac_s"])
+    if (run/"handbook.json").exists():
+        additional["historical"]=historical(run,graph_dir,baseline["total_tmac_s"])
+    pool_sessions=[read(p) for p in (run/"receipts").glob("gateway*.json")]
     return dict(ownership=read(run/"ownership.json"),stage=read(run/"staged.json"),stock=bench(stock),joined=bench(joined),
                 matched_token_budgets=True,output_hash_matches=sum(a["output_sha256"]==b["output_sha256"] for a,b in zip(stock,joined)),
                 transition_requests=len(stress),transition_http_200=sum(r["http"]==200 for r in stress),
                 timings=timings(joined+stress,broker,events), idle=idle_rate(events,broker,after["monotonic_ns"]),
                 direct_pool={i:live_shares(events[i]) for i in RANKS},gpu_job_setup_ms=quantiles(setup),
                 tickets_by_rank=phase,inference_pool={k:after["pool"][k]-before["pool"][k] for k in ("submitted","accepted","rejected")},
+                qualification_inference_pool={k:sum(int(session[k]) for session in pool_sessions)
+                                             for k in ("submitted","accepted","rejected","unknown")},
+                comparison_standalone=dict(seconds=baseline["seconds"],total_tmac_s=baseline["total_tmac_s"]),
+                sustained_idle=sustained, **additional,
                 peak_c_by_rank=temps,profile=read(run/"native-profile.json"),native_failures=sum(
                     row["event"]=="native_error" for es in events.values() for row in es))
 
