@@ -41,6 +41,20 @@ Over 40 requests the p99 from broker demand to all four miners parked was 1.93 m
 
 The 92°C supervisor cutoff triggered three times in these long-context tests. Joined serving stopped during the 200K prefill. Non-joined serving completed 200K and stopped during the following 131K prefill. A second non-joined run stopped about a second after the full 32K/8,192 response finished. The successful 131K and 32K samples used benchmark-only cooling intervals to 70°C between requests. All four miners had resumed before each timed request. The final active non-joined session passed the production and post-mining handoff checks. [Thermal readings and test conditions](non-joined-qualification.json)
 
+## Native K780 calibration on November 24
+
+The four schedulers can report the selected miner build in the `slice_profile` field of the `native_rank` startup event. The `nonce-readback` build uses the same CUDA kernels and 188-tile slices as the original deployment. It copies the nonce signal and its Merkle root into pinned host memory once per nonce and reuses those 96 bytes for the remaining slices.
+
+The private miner revision `16d0056d220acc7ce922260baa4813d87274e512` builds this profile with `BPM_SLICE_PROFILE=nonce-readback`. The staged library SHA-256 is `95e160cc8a794ec411818dff0edeecdbb91ac242636504a687be992632bb5299`. On the canonical non-joined deployment, matched 210-second paid intervals measured 1,180.00 TMAC/s before and 1,180.99 after. F2Pool acknowledged shares on every rank, with 60 accepts before and 42 after and zero rejects in either interval. The throughput figures use completed tiles. These short intervals provide limited precision for a payout estimate.
+
+For a comparable paid measurement, collect a native Responses transition log and per-GPU power, clock and thermal samples during one service run. The following command selects a continuous idle interval after the last request, calculates completed mining work on each rank, counts pool acknowledgements and matches each handoff with the GPU start signal. A 210-second window provides seven 30-second rate samples. The headerless `nvidia-smi` CSV columns are timestamp, index, GPU utilization, temperature, power draw, SM clock, memory clock, and the software and hardware thermal slowdown counters in that order. [Measurement helper](../native_calibration_sample.py)
+
+```sh
+calibration_dir="$runtime/native-integration/docker/deepseek-v41/upstream/graph-275/f2pool"
+python3 "$calibration_dir/native_calibration_sample.py" --run "$run" --requests "$requests" \
+    --telemetry "$gpu_csv" --seconds 210 --warm 20 --out "$receipt"
+```
+
 ## Joined qualification at 275 W per GPU on November 23
 
 | Four-card operating mode | Measured mining rate | Fraction of previous standalone K780 |
@@ -104,7 +118,7 @@ export CARGO_TARGET_DIR="$scratch/target" RUSTC_BOOTSTRAP=1
 (cd "$scratch/miner" && RUSTFLAGS='-C panic=abort' cargo +1.97.0 build --offline --locked --release --lib -j 16)
 ```
 
-The qualified library SHA-256 is `e9ca9d12e105f1e075e45148ab7e84e3b240a20564fd23a00b422a50a611c5fc`. For a fresh production release, use a pinned checkout of the operator repository directly under the runtime directory and run the following. Staging refuses to overwrite a populated production configuration. Existing production installations can be verified directly with `native_live.py`. It sends a small public Responses fixture and waits for a real F2Pool acknowledgement on every GPU.
+The library used in the original joined qualification had SHA-256 `e9ca9d12e105f1e075e45148ab7e84e3b240a20564fd23a00b422a50a611c5fc`. For a fresh production release, use a pinned checkout of the operator repository directly under the runtime directory and run the following. Staging refuses to overwrite a populated production configuration. Existing production installations can be verified directly with `native_live.py`. It sends a small public Responses fixture and waits for a real F2Pool acknowledgement on every GPU.
 
 ```sh
 code="$runtime/native-production-code/docker/deepseek-v41/upstream/graph-275/f2pool"
