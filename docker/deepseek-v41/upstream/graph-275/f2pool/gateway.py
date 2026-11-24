@@ -377,6 +377,11 @@ async def run(args):
     tasks = [asyncio.create_task(gw.connect()), asyncio.create_task(gw.watch_arm())]
     async with server:
         await stop.wait()
+        # Python 3.12 waits for active streams when the server context exits.
+        # Resident SGLang ranks reconnect when their current stream closes.
+        server.close()
+        for writer in tuple(gw.clients):
+            writer.close()
     for t in tasks:
         t.cancel()
     await asyncio.gather(*tasks, return_exceptions=True)

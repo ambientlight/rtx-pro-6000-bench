@@ -2,20 +2,74 @@
 import argparse
 import asyncio
 import contextlib
+import fcntl
 import json
 import os
 from pathlib import Path
 import re
 import signal
 import stat
+import struct
 import sys
 import time
 
 ID = re.compile(r"[A-Za-z0-9._:-]{1,192}\Z")
 
 
+class NativePermit:
+    """One CPU writer. Each serving rank holds a shared lock across one GPU event."""
+
+    def __init__(self, path, fleet):
+        self.fleet = fleet
+        self.file = path.open("xb", buffering=0)
+        self.fd = self.file.fileno()
+        self.epoch = 0
+        self.held = True
+        self.waiter = None
+        self.closing = False
+        fcntl.flock(self.fd, fcntl.LOCK_EX)
+        self.file.write(struct.pack("<QQ", self.epoch, os.getpid()))
+
+    def publish(self):
+        self.epoch += 1
+        os.pwrite(self.fd, struct.pack("<Q", self.epoch), 0)
+
+    def update(self, serving):
+        if serving or self.closing:
+            if self.held or self.waiter is not None:
+                return
+            self.publish()  # Even epochs exclude new GPU operations before waiting.
+            self.fleet.record("native_demand", epoch=self.epoch)
+            try:
+                fcntl.flock(self.fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                self.waiter = asyncio.create_task(self.drain())
+            else:
+                self.held = True
+                self.fleet.record("native_drained", epoch=self.epoch)
+        elif self.held:
+            self.publish()
+            self.held = False
+            self.fleet.record("native_release", epoch=self.epoch)
+            fcntl.flock(self.fd, fcntl.LOCK_UN)
+
+    async def drain(self):
+        await asyncio.to_thread(fcntl.flock, self.fd, fcntl.LOCK_EX)
+        self.held = True
+        self.waiter = None
+        self.fleet.record("native_drained", epoch=self.epoch)
+        self.fleet.notify()
+
+    async def close(self):
+        self.closing = True
+        self.update(True)
+        if self.waiter is not None:
+            await self.waiter
+        self.file.close()
+
+
 class Fleet:
-    def __init__(self, workers, timeout=5, watch_workers=False, inference_only_ranks=None, timeline=None):
+    def __init__(self, workers, timeout=5, watch_workers=False, inference_only_ranks=None, timeline=None, native_permit=None):
         self.timeout = timeout
         self.watch_workers = watch_workers
         self.claims = {}  # None before dispatch, then the set of ranks that took it.
@@ -26,6 +80,7 @@ class Fleet:
         self.workers = [Worker(self, path) for path in workers]
         self.tasks = []
         self.timeline = timeline
+        self.native = NativePermit(native_permit, self) if native_permit else None
         self.previous_state = None
         self.record_state()
 
@@ -47,6 +102,8 @@ class Fleet:
             self.previous_state = current
 
     def notify(self):
+        if self.native:
+            self.native.update(self.serving)
         self.record_state()
         event, self.changed = self.changed, asyncio.Event()
         event.set()
@@ -64,12 +121,18 @@ class Fleet:
         for task in self.tasks:
             task.cancel()
         await asyncio.gather(*self.tasks, return_exceptions=True)
+        if self.native:
+            await self.native.close()
+
+    @property
+    def all_held(self):
+        return all(w.held for w in self.workers) and (self.native is None or self.native.held)
 
     async def drained(self, rid):
         start = time.monotonic_ns()
-        required_drain = not all(w.held for w in self.workers)
+        required_drain = not self.all_held
         async with asyncio.timeout(self.timeout):
-            while rid in self.claims and not all(w.held for w in self.workers):
+            while rid in self.claims and not self.all_held:
                 await self.changed.wait()
         if rid not in self.claims:
             raise ValueError("reservation was canceled")
@@ -78,6 +141,8 @@ class Fleet:
 
     def status(self):
         return dict(serving=self.serving, claims=len(self.claims), idle=self.idle,
+                    native_epoch=self.native.epoch if self.native else None,
+                    native_drained=self.native.held if self.native else None,
                     drained=[w.held for w in self.workers], errors=[w.error for w in self.workers],
                     watch_required=self.watch_workers, watched=[w.watched for w in self.workers],
                     watch_errors=[w.watch_error for w in self.workers])
@@ -100,6 +165,10 @@ class Fleet:
                     self.ranks[rank] = writer
                     self.idle[rank] = args[0] == "IDLE"
                     self.notify()
+                    if self.native and args[0] == "BUSY":
+                        async with asyncio.timeout(self.timeout):
+                            while not self.native.held:
+                                await self.changed.wait()
                     answer = "OK"
                 elif len(args) == 3 and args[0] == "DISPATCH":
                     child, parent = args[1:]
@@ -287,6 +356,7 @@ async def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--socket", required=True, type=Path)
     p.add_argument("--timeline", type=Path, help="fresh aggregate-only transition log")
+    p.add_argument("--native-permit", type=Path, help="new idle permission file shared by the four SGLang ranks")
     mode = p.add_mutually_exclusive_group(required=True)
     mode.add_argument("--worker", action="append", type=Path, default=[])
     mode.add_argument("--inference-only-ranks", type=int, choices=(4,),
@@ -304,9 +374,11 @@ async def main():
         p.error("broker socket path is already in use")
     if args.inference_only_ranks and args.watch_workers:
         p.error("--watch-workers needs standalone workers")
+    if args.native_permit and (args.inference_only_ranks != 4 or args.native_permit.parent != args.socket.parent):
+        p.error("--native-permit requires four ranks and the private broker socket directory")
     timeline = args.timeline.open("x", buffering=1) if args.timeline else None
     fleet = Fleet(args.worker, args.timeout, watch_workers=args.watch_workers,
-                  inference_only_ranks=args.inference_only_ranks, timeline=timeline)
+                  inference_only_ranks=args.inference_only_ranks, timeline=timeline, native_permit=args.native_permit)
     stop = asyncio.Event()
     for sig in (signal.SIGTERM, signal.SIGINT):
         asyncio.get_running_loop().add_signal_handler(sig, stop.set)

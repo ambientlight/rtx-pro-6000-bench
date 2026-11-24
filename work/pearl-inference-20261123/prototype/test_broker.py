@@ -206,3 +206,47 @@ class InferenceOnlyBrokerTest(unittest.IsolatedAsyncioTestCase):
                 finally:
                     for conn in sockets:
                         await conn.close()
+
+
+class NativePermitTests(unittest.IsolatedAsyncioTestCase):
+    async def test_blocking_gpu_events_and_canceled_admission(self):
+        import fcntl
+        import struct
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory)/"permit"
+            fleet = Fleet([], inference_only_ranks=4, native_permit=path)
+            try:
+                with path.open("rb", buffering=0) as first, path.open("rb", buffering=0) as last:
+                    fleet.idle[:] = [True]*4
+                    fleet.notify()
+                    self.assertEqual(struct.unpack("<Q", first.read(8))[0], 1)
+                    for worker in (first,last):
+                        fcntl.flock(worker, fcntl.LOCK_SH | fcntl.LOCK_NB)
+                    fleet.claims["one"] = None
+                    fleet.notify()
+                    self.assertFalse(fleet.all_held)
+                    self.assertEqual(struct.unpack("<Q", last.read(8))[0], 2)
+                    del fleet.claims["one"]
+                    fleet.notify()
+                    self.assertEqual(fleet.native.epoch, 2)
+                    fleet.claims["two"] = None
+                    fleet.notify()
+                    drain = asyncio.create_task(fleet.drained("two"))
+                    fcntl.flock(first, fcntl.LOCK_UN)
+                    await asyncio.sleep(.01)
+                    self.assertFalse(drain.done())
+                    fcntl.flock(last, fcntl.LOCK_UN)
+                    self.assertEqual(await asyncio.wait_for(drain,1), "DRAINED")
+                    with self.assertRaises(BlockingIOError):
+                        fcntl.flock(last,fcntl.LOCK_SH | fcntl.LOCK_NB)
+                    del fleet.claims["two"]
+                    fleet.idle[3] = False
+                    fleet.notify()
+                    self.assertTrue(fleet.all_held)
+                    fleet.idle[3] = True
+                    fleet.notify()
+                    self.assertEqual(fleet.native.epoch,3)
+                    fcntl.flock(last,fcntl.LOCK_SH | fcntl.LOCK_NB)
+            finally:
+                await fleet.stop()

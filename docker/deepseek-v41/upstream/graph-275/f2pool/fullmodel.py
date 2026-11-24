@@ -18,17 +18,19 @@ HERE = Path(__file__).resolve()
 REPO = HERE.parents[5]
 GRAPH = HERE.parents[1]
 HOST = REPO.parent
-RUN = HOST / 'live-f2pool-verification'
+NATIVE_CONFIG = os.environ.get('PEARL_NATIVE_IDLE_CONFIG')
+RUN = Path(NATIVE_CONFIG).resolve().parent if NATIVE_CONFIG else HOST / 'live-f2pool-verification'
 STATE = RUN / 'serving'
 OLD = HOST / 'graph-production-275'
 PROTO = REPO / 'work/pearl-inference-20261123/prototype'
 ORIGINAL = Path('/mnt/hot/dsv41_state/production')
-BROKER = 'dsv41-f2pool-fence'
-CANDIDATE = 'dsv41-f2pool-model'
-GUARD = 'dsv41-f2pool-guard'
-RESTORE = 'dsv41-f2pool-restore'
-GATEWAY = 'dsv41-f2pool-gateway'
-SAMPLER = 'dsv41-f2pool-sampler'
+PREFIX = 'dsv41-native-' if NATIVE_CONFIG else 'dsv41-f2pool-'
+BROKER = PREFIX+'fence'
+CANDIDATE = PREFIX+'model'
+GUARD = PREFIX+'guard'
+RESTORE = PREFIX+'restore'
+GATEWAY = PREFIX+'gateway'
+SAMPLER = PREFIX+'sampler'
 SOCKET = Path(os.environ.get('XDG_RUNTIME_DIR', f'/run/user/{os.getuid()}')) / BROKER / 'broker.sock'
 SMOKES = ('smoke.json', 'smoke-structured.json', 'smoke-tools.json', 'smoke-vision.json')
 DOCKER = ('docker', '--context', 'shared-operator')
@@ -52,6 +54,8 @@ def unit(name, *command, properties=(), env=(), output=None):
     if output:
         args += ['-p', 'StandardOutput=append:' + str(output), '-p', 'StandardError=append:' + str(output)]
     args.extend('--setenv=' + item for item in env)
+    if NATIVE_CONFIG:
+        args.append('--setenv=PEARL_NATIVE_IDLE_CONFIG='+NATIVE_CONFIG)
     run(*args, *command)
 
 
@@ -167,12 +171,15 @@ def start(token, minutes):
     with (STATE/'cutover.lock').open('a') as lock:
         fcntl.flock(lock,fcntl.LOCK_EX)
         try:
-            run('systemd-run','--user','--unit='+RESTORE,'--on-active='+str(minutes)+'min',
+            context = ['--setenv=PEARL_NATIVE_IDLE_CONFIG='+NATIVE_CONFIG] if NATIVE_CONFIG else []
+            run('systemd-run','--user','--collect',*context,'--unit='+RESTORE,'--on-active='+str(minutes)+'min',
                 '--timer-property=AccuracySec=1s',PYTHON,HERE,'restore')
             if not active(RESTORE+'.timer'):
                 raise RuntimeError('Recovery timer did not arm')
-            unit(BROKER,PYTHON,PROTO/'broker.py','--socket',SOCKET,'--inference-only-ranks','4',
-                 properties=('RuntimeDirectory='+BROKER,'RuntimeDirectoryMode=0700'))
+            native_args = ['--native-permit',SOCKET.with_name('idle.permit'),'--timeline',RUN/'broker.jsonl'] if NATIVE_CONFIG else []
+            unit(BROKER,PYTHON,PROTO/'broker.py','--socket',SOCKET,'--inference-only-ranks','4',*native_args,
+                 properties=('RuntimeDirectory='+BROKER,'RuntimeDirectoryMode=0700',
+                             *(['OnFailure='+RESTORE+'.service'] if NATIVE_CONFIG else [])))
             for _ in range(40):
                 if SOCKET.exists():
                     break
@@ -197,7 +204,7 @@ def start(token, minutes):
                    'PEARL_PUBLIC_REPLAY=1','PEARL_WOB_MODULE=checkpoint_graph','PEARL_GRAPH_VERIFY=1',
                    'PEARL_GPU_PREPARE=1','PEARL_REPLAY_POOL_PORT=31990',
                    'PEARL_REPLAY_POOL_HOST=127.0.0.1','PEARL_REPLAY_GATEWAY_TOKEN_FILE='+str(token))
-            unit(CANDIDATE,OLD/'env-run',HERE,'launch-oci',env=env,
+            unit(CANDIDATE,OLD/'env-run',HERE,'launch-oci',env=env+('RAYON_NUM_THREADS=2',) if NATIVE_CONFIG else env,
                  properties=('MemoryMax=365G','MemorySwapMax=0','TimeoutStopSec=70','OnFailure='+RESTORE+'.service'),
                  output=RUN/'logs/fullmodel.log')
             print('Private full-model startup initiated; fresh startup smokes and graph profile appear in status.',flush=True)
@@ -215,6 +222,8 @@ def launch_oci():
     # The tested environment wrapper establishes all OCI sys.path, CUDA, and dynamic-linker
     # settings. A new interpreter applies this branch's authenticated pool client first.
     paths = [str(PROTO)] + [p for p in os.environ['PYTHONPATH'].split(os.pathsep) if p != str(PROTO)]
+    if NATIVE_CONFIG:
+        paths.insert(0,str(RUN/'pkg'))
     env = {**os.environ,'PYTHONPATH':os.pathsep.join(paths),'SGLANG_LISTEN_ADDRESS':'127.0.0.1'}
     env.pop('API_KEY',None)
     os.execve(sys.executable,[sys.executable,str(OLD/'boot/boot.py'),'run'],env)
