@@ -8,12 +8,14 @@ from pathlib import Path
 import re
 import signal
 import stat
+import sys
+import time
 
 ID = re.compile(r"[A-Za-z0-9._:-]{1,192}\Z")
 
 
 class Fleet:
-    def __init__(self, workers, timeout=5, watch_workers=False, inference_only_ranks=None):
+    def __init__(self, workers, timeout=5, watch_workers=False, inference_only_ranks=None, timeline=None):
         self.timeout = timeout
         self.watch_workers = watch_workers
         self.claims = {}  # None before dispatch, then the set of ranks that took it.
@@ -23,8 +25,29 @@ class Fleet:
         self.changed = asyncio.Event()
         self.workers = [Worker(self, path) for path in workers]
         self.tasks = []
+        self.timeline = timeline
+        self.previous_state = None
+        self.record_state()
+
+    def record(self, event, **data):
+        if self.timeline is not None:
+            try:
+                self.timeline.write(json.dumps(dict(event=event, monotonic_ns=time.monotonic_ns(), **data)) + "\n")
+            except OSError:
+                # A measurement filesystem failure must never delay a reservation.
+                print("Broker timeline stopped after a write error", file=sys.stderr, flush=True)
+                self.timeline = None
+
+    def record_state(self):
+        if self.timeline is None:
+            return
+        current = self.serving, sum(w.held for w in self.workers), sum(w.watched for w in self.workers)
+        if current != self.previous_state:
+            self.record("state", serving=current[0], held=current[1], watched=current[2])
+            self.previous_state = current
 
     def notify(self):
+        self.record_state()
         event, self.changed = self.changed, asyncio.Event()
         event.set()
 
@@ -43,11 +66,14 @@ class Fleet:
         await asyncio.gather(*self.tasks, return_exceptions=True)
 
     async def drained(self, rid):
+        start = time.monotonic_ns()
+        required_drain = not all(w.held for w in self.workers)
         async with asyncio.timeout(self.timeout):
             while rid in self.claims and not all(w.held for w in self.workers):
                 await self.changed.wait()
         if rid not in self.claims:
             raise ValueError("reservation was canceled")
+        self.record("admitted", elapsed_ns=time.monotonic_ns() - start, required_drain=required_drain)
         return "DRAINED"
 
     def status(self):
@@ -260,6 +286,7 @@ class Worker:
 async def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--socket", required=True, type=Path)
+    p.add_argument("--timeline", type=Path, help="fresh aggregate-only transition log")
     mode = p.add_mutually_exclusive_group(required=True)
     mode.add_argument("--worker", action="append", type=Path, default=[])
     mode.add_argument("--inference-only-ranks", type=int, choices=(4,),
@@ -277,8 +304,9 @@ async def main():
         p.error("broker socket path is already in use")
     if args.inference_only_ranks and args.watch_workers:
         p.error("--watch-workers needs standalone workers")
+    timeline = args.timeline.open("x", buffering=1) if args.timeline else None
     fleet = Fleet(args.worker, args.timeout, watch_workers=args.watch_workers,
-                  inference_only_ranks=args.inference_only_ranks)
+                  inference_only_ranks=args.inference_only_ranks, timeline=timeline)
     stop = asyncio.Event()
     for sig in (signal.SIGTERM, signal.SIGINT):
         asyncio.get_running_loop().add_signal_handler(sig, stop.set)
@@ -291,6 +319,8 @@ async def main():
     finally:
         await fleet.stop()
         args.socket.unlink(missing_ok=True)
+        if timeline is not None:
+            timeline.close()
 
 
 if __name__ == "__main__":
