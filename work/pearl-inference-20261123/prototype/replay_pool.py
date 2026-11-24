@@ -8,6 +8,7 @@ import gzip
 import ipaddress
 import json
 import os
+from pathlib import Path
 import re
 import threading
 import time
@@ -69,9 +70,12 @@ def frame(message):
     return data
 
 
-def submission_frame(serial, job, raw):
+def submission_frame(serial, job, raw, phase=None):
     wire = base64.b64encode(gzip.compress(raw, compresslevel=1, mtime=0)).decode("ascii")
-    return frame(dict(id=serial, method="mining.submit", params=dict(job_id=job.id, plain_proof=wire)))
+    params = dict(job_id=job.id, plain_proof=wire)
+    if phase is not None:
+        params["phase"] = phase
+    return frame(dict(id=serial, method="mining.submit", params=params))
 
 
 class ReplayPool:
@@ -82,14 +86,21 @@ class ReplayPool:
         port = os.environ.get("PEARL_REPLAY_POOL_PORT")
         if port is None:
             return None
-        return cls(os.environ.get("PEARL_REPLAY_POOL_HOST", "127.0.0.1"), int(port))
+        token_file = os.environ.get("PEARL_REPLAY_GATEWAY_TOKEN_FILE")
+        token = None
+        if token_file:
+            token = Path(token_file).read_text().strip()
+            if not re.fullmatch(r"[0-9a-fA-F]{64}", token):
+                raise ValueError("invalid local gateway credential")
+        return cls(os.environ.get("PEARL_REPLAY_POOL_HOST", "127.0.0.1"), int(port), token=token)
 
-    def __init__(self, host, port, *, capacity=8):
+    def __init__(self, host, port, *, capacity=8, token=None):
         host = "127.0.0.1" if host == "localhost" else host
         address = ipaddress.ip_address(host)  # Numeric loopback only; no DNS.
         if not address.is_loopback or not 0 < port < 65536 or capacity < 1:
             raise ValueError("expected loopback endpoint and a positive queue capacity")
         self._host, self._port, self._capacity = str(address), port, capacity
+        self._token = token
         self._lock = threading.Lock()
         self._closed = False
         self._job = self._loop = self._main = self._wake = None
@@ -190,7 +201,7 @@ class ReplayPool:
 
     async def _session(self, reader, writer, generation):
         writer.write(frame(dict(id=1, method="mining.authorize", params={
-            "wallet": "fixture", "worker": "public-projection", "pass": "x", "password": "x",
+            "wallet": "fixture", "worker": "public-projection", "pass": self._token or "x", "password": self._token or "x",
             "agent": "pearl-sglang-prototype", "type": "v2"})))
         await asyncio.wait_for(writer.drain(), 2)
         sender = asyncio.create_task(self._send(writer))
@@ -251,7 +262,8 @@ class ReplayPool:
                 continue
             job, phase, witness = item
             try:
-                outgoing = await asyncio.to_thread(submission_frame, serial, job, witness)
+                phase_args = (phase,) if self._token else ()
+                outgoing = await asyncio.to_thread(submission_frame, serial, job, witness, *phase_args)
             except ValueError:
                 with self._lock:
                     if self._pending.pop(serial, None) is not None:
