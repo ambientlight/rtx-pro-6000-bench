@@ -68,6 +68,7 @@ class Peer(socketserver.ThreadingTCPServer):
         self.lock = threading.Lock()
         self.sustained = args.sustained
         self.receipt = args.receipt
+        self.accepted_log = getattr(args, "accepted_log", None)
         self.verifier = args.verifier.resolve()
         self.shards = []
         for rank in range(4):
@@ -125,6 +126,15 @@ class Peer(socketserver.ThreadingTCPServer):
         else:
             self.results["accepted"].append(row)
         self.save()
+        if self.accepted_log is not None:
+            # Record witness hashes and shape metadata only. Keep the cumulative ledger bounded.
+            keys = ("job_id", "proof_sha256", "tp_rank", "proof_rows", "received_monotonic_ns", "ack_monotonic_ns")
+            event = {k: row[k] for k in keys}
+            event["peer_started_at"] = self.results["started_at"]
+            self.accepted_log.parent.mkdir(parents=True, exist_ok=True)
+            fd = os.open(self.accepted_log, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+            with os.fdopen(fd, "a") as stream:
+                stream.write(json.dumps(event, separators=(",", ":")) + "\n")
 
     def verify_request(self, request, client_address):
         return self.limit.acquire(blocking=False)
@@ -175,6 +185,7 @@ class Handler(socketserver.StreamRequestHandler):
             while True:
                 frame = receive(self.rfile)
                 received_at = time.time()
+                received_ns = time.monotonic_ns()
                 try:
                     with peer.lock:
                         if peer.at_limit():
@@ -192,6 +203,8 @@ class Handler(socketserver.StreamRequestHandler):
                     if peer.at_limit():
                         return
                     send_frame(dict(id=frame["id"], result=True, error=None))
+                    if peer.accepted_log is not None:
+                        row.update(received_monotonic_ns=received_ns, ack_monotonic_ns=time.monotonic_ns())
                     peer.record(dict(received_at=received_at, acknowledged_at=time.time(), **details, **row))
         except (ValueError, KeyError, OSError, TypeError):
             # An idle client can disconnect or replace its generation at any time.
@@ -208,6 +221,7 @@ if __name__ == "__main__":
     parser.add_argument("--model", type=Path, required=True)
     parser.add_argument("--verifier", type=Path, required=True)
     parser.add_argument("--receipt", type=Path, required=True)
+    parser.add_argument("--accepted-log", type=Path, help="append an event for every ACK with its proof hash, rank, shape and local timestamps")
     parser.add_argument("--sustained", action="store_true", help="accept unlimited verified synthetic shares, retaining only 16 sample records")
     parser.add_argument("--share-target", type=parse_target, help="hex base target for sustained mode; defaults to the qualification target / 65536")
     parser.add_argument("--resume-receipt", action="store_true", help="resume the same sustained job and its verified counters")
@@ -216,5 +230,12 @@ if __name__ == "__main__":
         parser.error("--share-target requires --sustained")
     if args.resume_receipt and not args.sustained:
         parser.error("--resume-receipt requires --sustained")
+    if args.accepted_log is not None:
+        if args.accepted_log.resolve() == args.receipt.resolve():
+            parser.error("accepted-log and receipt must use different files")
+        args.accepted_log.parent.mkdir(parents=True, exist_ok=True)
+        if not args.resume_receipt:
+            fd = os.open(args.accepted_log, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            os.close(fd)
     with Peer(args) as server:
         server.serve_forever()

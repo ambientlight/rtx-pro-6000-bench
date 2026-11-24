@@ -1,5 +1,7 @@
 # Public Pearl projection in the DSPARK target graph
 
+The four-GPU production-graph comparison measures decode, prefill, both handoff directions, and miner-equivalent work at 275 W per card. [Performance and mining results](performance.md)
+
 This companion captures DeepSeek V4.1 layer 0 `attn.wo_b` in the native SM120 target-verification graph. Each TP4 rank reads its real 5,120 × 2,048 weight shard. The calibrated INT7 activations and weights, plus Pearl v3 noise, feed one projection. The same noisy tensor-core accumulators supply the ticket transcripts and the corrected output consumed by inference. The production prefill backend runs eagerly. Eligible prefill chunks use the existing joined projection. [Adapter](../../../../work/pearl-inference-20261123/prototype/checkpoint_graph.py) · [CUDA projection](../../../../work/pearl-inference-20261123/prototype/operator/pearl_wo_b.cu)
 
 ## Restore and build
