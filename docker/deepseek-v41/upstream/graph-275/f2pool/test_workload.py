@@ -95,6 +95,21 @@ class WorkloadTest(unittest.TestCase):
             self.assertEqual(cooling["peak_c"], 89)
             self.assertGreater(cooling["paused_s"], 0)
 
+    def test_verified_wide_prefill_when_some_chunks_bypass_mining(self):
+        before, after = ranks(0), ranks(1)
+        for r in w.RANKS:
+            device = after["counters"][r]["cuda"]
+            device["eager"]["prefill"] = dict(mined_calls=2, mined_rows=4096, backpressure_calls=2, backpressure_rows=4096)
+            device["eager_verify"]["prefill"] = dict(verified_steps=2, tickets_scanned=40*4096)
+        graphs = {r:{"decode_cuda_graph":1} for r in w.RANKS}
+        work = w.scan_summary(before, after, graphs)
+        self.assertEqual(work["reconciled_mac_equivalent"]["prefill"], 4 * 4096 * 40 * 262_144)
+        self.assertEqual(work["ticket_issues"]["prefill"], [])
+        with patch.object(w.graph, "drained_projection", return_value=before), \
+             patch.object(w.graph, "projection_snapshot", return_value=after) as read:
+            self.assertIs(w.request_projection(None, before, graphs, 8192), after)
+            read.assert_called_once_with(None)
+
     def test_complete_offline_run_and_transition_accounting(self):
         with tempfile.TemporaryDirectory() as tmp:
             paths = Path(tmp)

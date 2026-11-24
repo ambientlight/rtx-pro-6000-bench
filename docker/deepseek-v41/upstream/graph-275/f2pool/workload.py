@@ -4,6 +4,7 @@ import hashlib
 import json
 import math
 import os
+import signal
 import sys
 import threading
 import time
@@ -153,6 +154,53 @@ def expected_shares(job, macs):
     return macs * floor / (1 << 256)
 
 
+def projection_totals(doc, rank):
+    graph_calls = sum(row["calls"] for row in doc["shapes"][rank]
+                      if row["mode"] == "TARGET_VERIFY" and row["path"] == "target_graph")
+    prefill = graph.phase_counters(doc, rank).get("prefill_jobs", {})
+    return graph_calls, sum(n for key, n in prefill.items() if key.endswith("_rows"))
+
+
+def request_projection(directory, before, graphs, input_tokens):
+    # An idle callback can initially present an old, internally drained snapshot.
+    # Reconcile its progress with independent HTTP graph metrics and issued prompt rows.
+    wanted = {}
+    for rank in RANKS:
+        calls, rows = projection_totals(before, rank)
+        wanted[rank] = (calls + graphs[rank].get("decode_cuda_graph", 0), rows + input_tokens)
+    deadline = time.monotonic() + 6
+    after = graph.drained_projection(directory)
+    while True:
+        counts = {rank:projection_totals(after, rank) for rank in RANKS}
+        if wanted == counts and not graph.pending_scans(after):
+            return after
+        if time.monotonic() >= deadline:
+            raise RuntimeError(f"Rank counters failed to settle: expected {wanted}, observed {counts}")
+        time.sleep(.1)
+        after = graph.projection_snapshot(directory)
+
+
+def aligned_prefill_macs(before, after, rank, jobs, scan):
+    # A job change or backpressure skips some chunks. Each remaining mined chunk
+    # still has an exact wide-ticket layout if every observed shape is aligned.
+    def observed(doc):
+        return {(row["real_rows"], row["executed_rows"]):row["calls"] for row in doc["shapes"][rank]
+                if row["mode"] == "EXTEND" and row["path"] == "eager_wo_b"}
+    old, new = observed(before), observed(after)
+    total = 0
+    for real, executed in old.keys() | new.keys():
+        n = new.get((real,executed), 0) - old.get((real,executed), 0)
+        if n < 0 or (n and (real != executed or real <= 0 or real % 16)):
+            return None
+        total += n * real
+    rows = jobs.get("mined_rows", 0)
+    if (total == sum(n for key,n in jobs.items() if key.endswith("_rows"))
+            and jobs.get("mined_calls", 0) == scan.get("verified_steps", 0)
+            and not scan.get("verification_errors", 0) and 40 * rows == scan.get("tickets_scanned", 0)):
+        return rows * 40 * 262_144
+    return None
+
+
 def scan_summary(before, after, graphs):
     work = graph.graph_work(before, after, [], graphs)
     counts = work["verifier_delta_by_rank"]
@@ -166,8 +214,17 @@ def scan_summary(before, after, graphs):
     macs = {}
     layouts = work["prefill_layout_reconciliation_by_rank"]
     if not graph.pending_scans(before) and not graph.pending_scans(after):
-        if all(layouts[r] is not None for r in RANKS):
-            macs["prefill"] = sum(layouts[r]["scanned_ticket_mac_equivalent"] for r in RANKS)
+        prefill = {}
+        for rank in RANKS:
+            if layouts[rank] is not None:
+                prefill[rank] = layouts[rank]["scanned_ticket_mac_equivalent"]
+            else:
+                data = counts[rank]
+                prefill[rank] = aligned_prefill_macs(before, after, rank, data.get("prefill_jobs", {}),
+                                                     data.get("prefill_scan", {}))
+        if all(n is not None for n in prefill.values()):
+            macs["prefill"] = sum(prefill.values())
+            work["ticket_accounting_issues"]["prefill"] = []
         issues = work["ticket_accounting_issues"]["decode"]
         if not issues and all(not any(
                 row["executed_rows"] != row["real_rows"] for name, row in by_path.items()
@@ -315,9 +372,9 @@ def run(args):
                     end_http = graph.completed_http_snapshot(base, start_http)
                     if end_http["active"] or end_http["total"] != start_http["total"] + 1:
                         raise RuntimeError("HTTP accounting could not isolate this public inference request")
-                    end_rank = graph.drained_projection(args.shape_dir)
-                    end_peer = gateway(args.gateway_receipt, run_id)
                     graphs = graph.graph_deltas(start_http, end_http)
+                    end_rank = request_projection(args.shape_dir, rank, graphs, len(ids))
+                    end_peer = gateway(args.gateway_receipt, run_id)
                     scans = scan_summary(rank, end_rank, graphs)
                     # Keep the first observation after a local job change unassigned while ranks
                     # asynchronously retire old tensors and prepare the new job.
@@ -355,7 +412,7 @@ def run(args):
                         summary["mined_decode_graph_passes"][r] += decode.get("calls", 0)
                         jobs = scans["rank_verifier_delta"][r].get("prefill_jobs", {})
                         summary["prefill_mined_rows"][r] += jobs.get("mined_rows", 0)
-                        summary["prefill_probed_rows"][r] += jobs.get("mined_rows", 0) + jobs.get("no_job_rows", 0)
+                        summary["prefill_probed_rows"][r] += sum(n for key,n in jobs.items() if key.endswith("_rows"))
                     summary["max_measured_request_s"] = max(summary["max_measured_request_s"],
                                                              time.monotonic() - started_ns / 1e9)
                     summary["model_issued_tokens"] += response["output_tokens"]
@@ -420,6 +477,10 @@ def main():
             or not 8192 <= args.input_tokens <= 32768 or args.input_tokens % CHUNK
             or not 1 <= args.output_tokens <= 256):
         p.error("Invalid port, duration, request limit or token budget (inputs must be 2,048-aligned)")
+    # systemd stops the sampler with SIGTERM on failback. Exit through the arm context.
+    def stop(signum, _frame):
+        raise SystemExit(128 + signum)
+    signal.signal(signal.SIGTERM, stop)
     result = run(args)
     print(json.dumps({k:result[k] for k in ("stop_reason","completed","positive_scan_on_all_ranks",
                                            "decode_graph_on_all_ranks","model_issued_tokens")}))
