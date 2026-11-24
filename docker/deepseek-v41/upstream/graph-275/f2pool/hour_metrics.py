@@ -288,19 +288,25 @@ def handoffs(path, start, end, samples):
         if i and not left["serving"] and timeline[i-1]["serving"]:
             resumes.append((left["monotonic_ns"],next((r["monotonic_ns"] for r in timeline[i+1:]
                             if r["serving"]),end)))
-    observations = sorted(set(tuple((w.get("release_ns"),w.get("first_gpu_seen_ns")) for w in s["idle"]["workers"])
-           for s in samples if "idle" in s and all(w.get("first_gpu_seen_ns") for w in s["idle"]["workers"])))
+    observations = [set() for _ in range(4)]
+    for sample in samples:
+        for rank,worker in enumerate(sample.get("idle",{}).get("workers",[])):
+            release,seen=worker.get("release_ns"),worker.get("first_gpu_seen_ns")
+            if release and seen and seen>=release:
+                observations[rank].add((release,seen))
     starts = []
     for edge, until in resumes:
-        for workers in observations:
-            if all(edge<=release<=seen<until for release,seen in workers):
-                starts.append((max(seen for _,seen in workers)-edge)/1e6)
-                break
+        # Thermal releases are independent across cards. A single coarse
+        # snapshot can contain a later resume for a GPU already seen running.
+        first=[min((seen for release,seen in clock if edge<=release<=seen<until),default=None)
+               for clock in observations]
+        if all(t is not None for t in first):
+            starts.append((max(first)-edge)/1e6)
     delays = [r["elapsed_ns"]/1e6 for r in events if r["event"]=="admitted" and r["required_drain"]
               and start<=r["monotonic_ns"]<=end]
     return dict(broker_idle_permitted_s=permits,demand_to_all_worker_drain_ms=distribution(delays),
                 idle_transitions=len(resumes),idle_to_all_gpu_reentry_ms=distribution(starts),
-                reentry_note="Includes transitions for which all four workers retained their GPU start stamps at sampling time.")
+                reentry_note="Earliest individually retained native timestamps on all four cards. Coarse sampling can miss earlier progress after a thermal release overwrites a timestamp; use the transition observer for a tighter bound.")
 
 
 def thermal(samples):
@@ -487,6 +493,9 @@ def summarize(folder, fleet_dir):
             lam = [x*(target+1)/(1<<256) for x,target in zip(macs,(min(targets),max(targets)))]
             work["expected_shares_at_hardest_and_easiest_sampled_targets"] = lam
             work["p_at_least_one_estimate_range"] = [-math.expm1(-v) for v in lam]
+    if (folder/"reentry-observer.jsonl").is_file():
+        from observe_reentry import summarize as reentry_summary
+        section("high_resolution_handoff",lambda:reentry_summary(folder/"reentry-observer.jsonl",window))
     section("gpu",lambda:thermal(samples))
     return summary
 
