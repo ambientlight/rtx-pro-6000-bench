@@ -41,6 +41,10 @@ def write(path, value):
 def parse_metrics(text):
     totals, graphs, hist, observed = {}, {r:{} for r in RANKS}, {}, set()
     active, http = graph.activity_metrics(text)
+    cohorts = {s:{"tokens":{},"hist":{}} for s in ("streaming","nonstreaming")}
+    live, response_status, responses_active = {}, {}, 0
+    cohort_counts = {"num_requests_total","prompt_tokens_total","generation_tokens_total"}
+    realtime = {"prefill_compute","prefill_cache","decode"}
     for line in text.splitlines():
         if not line.startswith("sglang:"):
             continue
@@ -49,12 +53,21 @@ def parse_metrics(text):
             metric = sample[7:].split("{",1)[0]
             name, _, suffix = metric.rpartition("_")
             if (metric not in COUNTERS and metric != "cuda_graph_passes_total"
+                    and metric not in ("http_requests_active","http_responses_total","realtime_tokens_total","prefill_effective_tokens_total")
                     and name not in HIST and name != "per_stage_req_latency_seconds"):
                 continue
             value = float(raw)
             if not math.isfinite(value) or value < 0:
                 raise ValueError("Nonfinite or negative metric")
             labels = dict(re.findall(r'(\w+)="([^"]*)"', sample))
+            if metric in ("http_responses_total","http_requests_active"):
+                if labels.get("endpoint")=="/v1/responses" and labels.get("method")=="POST":
+                    if metric=="http_requests_active":
+                        responses_active+=int(value)
+                    elif re.fullmatch(r"[1-5][0-9]{2}",labels.get("status_code","")):
+                        code=labels["status_code"]
+                        response_status[code]=response_status.get(code,0)+int(value)
+                continue
             if metric == "cuda_graph_passes_total":
                 rank, mode = labels["tp_rank"], labels["mode"]
                 if rank in RANKS and mode == "decode_cuda_graph":
@@ -62,6 +75,27 @@ def parse_metrics(text):
                 continue
             if labels.get("tp_rank","0") != "0":
                 continue
+            if metric in ("realtime_tokens_total","prefill_effective_tokens_total"):
+                mode = labels.get("mode")
+                selected = realtime if metric=="realtime_tokens_total" else {"input","device_hit","host_hit","storage_hit"}
+                if mode in selected:
+                    label = metric+"."+mode
+                    live[label] = live.get(label,0)+int(value)
+                continue
+            stream_label = {"true":"streaming","false":"nonstreaming"}.get(labels.get("is_streaming"))
+            if stream_label and metric in cohort_counts:
+                ct=cohorts[stream_label]["tokens"]
+                ct[metric]=ct.get(metric,0)+value
+            if stream_label and name in HIST and suffix in ("sum","count","bucket"):
+                ch=cohorts[stream_label]["hist"].setdefault(name,{})
+                bucket = None
+                if suffix=="bucket":
+                    numeric = float(labels["le"])
+                    if math.isfinite(numeric):
+                        bucket = "le_"+str(numeric)
+                field = bucket if suffix=="bucket" else suffix
+                if field:
+                    ch[field]=ch.get(field,0)+value
             if metric in COUNTERS:
                 observed.add(metric)
                 totals[metric] = totals.get(metric, 0) + value
@@ -90,7 +124,9 @@ def parse_metrics(text):
     endpoint_totals = {}
     for (endpoint, method), count in http:
         endpoint_totals[endpoint] = endpoint_totals.get(endpoint, 0) + count
-    return dict(active=active, http=endpoint_totals, totals=totals, hist=hist, graphs=graphs)
+    return dict(active=active,http=endpoint_totals,totals=totals,hist=hist,graphs=graphs,
+                cohorts=cohorts,scheduler_progress=live,responses_status=response_status,
+                responses_active=responses_active)
 
 
 def server(args):
@@ -174,7 +210,31 @@ def histogram(before, after):
                 p95_bucket_upper_s=next((bound for bound,count in bounds if n and count>=math.ceil(.95*n)),None))
 
 
-def serving_diff(before, after):
+def by_cohort(before,after,quiet_boundaries,aborted):
+    cohorts={}
+    for which,final in after.get("cohorts",{}).items():
+        init=before.get("cohorts",{}).get(which,{"tokens":{},"hist":{}})
+        tokens=counter_diff(init["tokens"],final["tokens"])
+        h={name:histogram(init["hist"].get(name,{}),row) for name,row in final["hist"].items()}
+        n=int(tokens.get("num_requests_total",0))
+        generated=int(tokens.get("generation_tokens_total",0))
+        ttft,e2e,tpot=(h.get(name,{}) for name in ("time_to_first_token_seconds","e2e_request_latency_seconds","request_time_per_output_token_seconds"))
+        matched=bool(quiet_boundaries and not aborted and n and ttft.get("observations")==e2e.get("observations")==n)
+        duration=e2e.get("sum_s",0)-ttft.get("sum_s",0)
+        # Samples are from the same tokenizer lifetime clock. One first token per
+        # finished request is removed from the numerator, including singleton outputs.
+        weighted=(generated-n)/duration if matched and generated>n and duration>0 else None
+        tpot_mean=tpot.get("mean_s")
+        cohorts[which]=dict(native_completed=n,prompt_tokens=int(tokens.get("prompt_tokens_total",0)),generated_tokens=generated,
+                ttft=ttft,e2e=e2e,tpot=tpot,populations_matched=matched,
+                fallback_basis="Sum of generated tokens after one first token per finished request, divided by summed native decode seconds.",
+                decode_seconds_from_matched_requests=duration if weighted is not None else None,
+                token_weighted_decode_tps_from_e2e_minus_ttft=weighted,
+                reciprocal_mean_request_tpot_tps=1/tpot_mean if tpot_mean else None)
+    return cohorts
+
+
+def serving_diff(before, after, quiet_boundaries=False):
     counters = counter_diff(before["totals"],after["totals"])
     h = {name:histogram(before["hist"].get(name,{}),after["hist"].get(name,{}))
          for name in set(before["hist"]) | set(after["hist"])}
@@ -189,7 +249,14 @@ def serving_diff(before, after):
     if (prefill.get("sum_s") and prefill["observations"] == counters.get("num_requests_total",0)
             and not counters.get("num_retracted_requests_total") and fresh is not None):
         prefill_rate = fresh / prefill["sum_s"]
-    return dict(completed_requests=counters.get("num_requests_total",0),aborted_requests=counters.get("num_aborted_requests_total",0),
+    http_counts=counter_diff(before["http"],after["http"])
+    return dict(response_endpoint_only=bool(http_counts.get("/v1/responses") and not any(v for k,v in http_counts.items() if k!="/v1/responses")),
+                responses_http_status=counter_diff(before.get("responses_status",{}),after.get("responses_status",{})),
+                responses_http_active_at_edges=[before.get("responses_active"),after.get("responses_active")],
+                native_tokenizer_cohorts=by_cohort(before,after,quiet_boundaries and not (before["active"] or after["active"]),
+                                                  counters.get("num_aborted_requests_total",0)),
+                scheduler_progress=counter_diff(before.get("scheduler_progress",{}),after.get("scheduler_progress",{})),
+                completed_requests=counters.get("num_requests_total",0),aborted_requests=counters.get("num_aborted_requests_total",0),
                 prompt_tokens=counters.get("prompt_tokens_total",0),fresh_prompt_tokens=fresh,cached_prompt_tokens=cached,
                 output_tokens=counters.get("generation_tokens_total",0),http_by_endpoint=counter_diff(before["http"],after["http"]),
                 active_at_boundaries=[before["active"],after["active"]],histograms=h,
@@ -327,7 +394,17 @@ def summarize(folder, fleet_dir):
             summary[key]=fn()
         except (ValueError, KeyError, OSError, TypeError, IndexError, ZeroDivisionError) as err:
             summary["issues"][key] = type(err).__name__ + ": "+str(err)[:160]
-    section("serving",lambda:serving_diff(first["server"],last["server"]))
+    boundary_idle=all(s["idle"]["broker"].get("serving") is False and
+                      all(s["idle"]["broker"].get("idle",[])) for s in (first,last))
+    section("serving",lambda:serving_diff(first["server"],last["server"],boundary_idle))
+    # A test can end mid-generation. Preserve separate estimates for the longest
+    # observed interior with matching quiet boundaries and expose its coverage.
+    quiet=[s for s in [first,*samples,last] if "server" in s and "idle" in s and not s["server"]["active"]
+           and s["idle"]["broker"].get("serving") is False and s["idle"]["broker"].get("idle")==[True]*4]
+    if len(quiet)>1 and not boundary_idle:
+        section("serving_idle_to_idle_interval",lambda:dict(
+            start_ns=quiet[0]["end_ns"],end_ns=quiet[-1]["end_ns"],
+            **serving_diff(quiet[0]["server"],quiet[-1]["server"],True)))
     def mining():
         graphs=graph.graph_deltas(first["server"],last["server"])
         work=scan_summary(first["projection"],last["projection"],graphs)

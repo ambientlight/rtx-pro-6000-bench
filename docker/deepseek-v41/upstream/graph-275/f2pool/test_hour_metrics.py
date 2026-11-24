@@ -41,6 +41,34 @@ class Receipts(unittest.TestCase):
         self.assertNotIn("sensitive",json.dumps(after))
         self.assertNotIn("account",json.dumps(after))
 
+    def test_responses_cohorts_are_separate_and_match_before_aggregating(self):
+        def points(n):
+            rows=[f'sglang:http_requests_active{{endpoint="/v1/responses",method="POST"}} 0',
+                  f'sglang:http_requests_total{{endpoint="/v1/responses",method="POST"}} {3*n}',
+                  f'sglang:http_responses_total{{endpoint="/v1/responses",method="POST",status_code="200"}} {3*n}',
+                  f'sglang:realtime_tokens_total{{tp_rank="0",mode="decode"}} {37*n}',
+                  f'sglang:realtime_tokens_total{{tp_rank="1",mode="decode"}} {37*n}']
+            for stream,done,out,first,e2e in (("true",2,12,1.,1.1),("false",1,51,2.,3.)):
+                for key,value in (("num_requests_total",done),("generation_tokens_total",out),
+                        ("time_to_first_token_seconds_count",done),("time_to_first_token_seconds_sum",first),
+                        ("e2e_request_latency_seconds_count",done),("e2e_request_latency_seconds_sum",e2e)):
+                    rows.append(f'sglang:{key}{{is_streaming="{stream}"}} {value*n}')
+            return m.parse_metrics("\n".join(rows))
+        a,b=points(4),points(5)
+        mixed=m.serving_diff(a,b,True)
+        self.assertTrue(mixed["response_endpoint_only"])
+        self.assertEqual(mixed["responses_http_status"],{"200":3})
+        self.assertEqual(mixed["scheduler_progress"]["realtime_tokens_total.decode"],37)
+        streaming=mixed["native_tokenizer_cohorts"]["streaming"]
+        self.assertAlmostEqual(streaming["token_weighted_decode_tps_from_e2e_minus_ttft"],100)
+        self.assertEqual(streaming["generated_tokens"],12)
+        self.assertAlmostEqual(mixed["native_tokenizer_cohorts"]["nonstreaming"]["token_weighted_decode_tps_from_e2e_minus_ttft"],50)
+        self.assertIsNone(m.serving_diff(a,b,False)["native_tokenizer_cohorts"]["streaming"]["token_weighted_decode_tps_from_e2e_minus_ttft"])
+        b["cohorts"]["streaming"]["hist"]["time_to_first_token_seconds"]["count"]-=1
+        self.assertIsNone(m.serving_diff(a,b,True)["native_tokenizer_cohorts"]["streaming"]["token_weighted_decode_tps_from_e2e_minus_ttft"])
+        b["totals"]["num_aborted_requests_total"]=1
+        self.assertIsNone(m.serving_diff(a,b,True)["native_tokenizer_cohorts"]["nonstreaming"]["token_weighted_decode_tps_from_e2e_minus_ttft"])
+
     def test_counter_reset_rejected(self):
         with self.assertRaises(ValueError):
             m.serving_diff(m.parse_metrics(prometheus(2)),m.parse_metrics(prometheus(1)))
