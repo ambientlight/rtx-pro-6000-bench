@@ -180,3 +180,29 @@ class BrokerTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(await rank.send(f"TAKE child {i}"), "OK")
             self.assertEqual(await rank.send(f"IDLE {i}"), "OK")
         await asyncio.wait_for(asyncio.gather(*(m.released.wait() for m in self.miners)), 1)
+
+
+class InferenceOnlyBrokerTest(unittest.IsolatedAsyncioTestCase):
+    async def test_four_scheduler_ranks_with_no_direct_worker(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'broker.sock'
+            fleet = Fleet([], inference_only_ranks=4)
+            async with await asyncio.start_unix_server(fleet.client, path):
+                sockets = [await Socket.open(path) for _ in range(5)]
+                try:
+                    control, *ranks = sockets
+                    self.assertEqual(fleet.status()['drained'], [])
+                    self.assertEqual(await control.send('ADMIT live'), 'DRAINED')
+                    self.assertEqual(await control.send('DISPATCH live'), 'OK')
+                    for i, rank in enumerate(ranks):
+                        self.assertIn('live', fleet.claims)
+                        self.assertEqual(await rank.send(f'BUSY {i}'), 'OK')
+                        self.assertEqual(await rank.send(f'TAKE live {i}'), 'OK')
+                    self.assertNotIn('live', fleet.claims)
+                    for i, rank in enumerate(ranks):
+                        self.assertTrue(fleet.serving)
+                        self.assertEqual(await rank.send(f'IDLE {i}'), 'OK')
+                    self.assertFalse(fleet.serving)
+                finally:
+                    for conn in sockets:
+                        await conn.close()

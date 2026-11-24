@@ -13,12 +13,13 @@ ID = re.compile(r"[A-Za-z0-9._:-]{1,192}\Z")
 
 
 class Fleet:
-    def __init__(self, workers, timeout=5, watch_workers=False):
+    def __init__(self, workers, timeout=5, watch_workers=False, inference_only_ranks=None):
         self.timeout = timeout
         self.watch_workers = watch_workers
         self.claims = {}  # None before dispatch, then the set of ranks that took it.
-        self.ranks = [None] * len(workers)
-        self.idle = [False] * len(workers)
+        rank_count = len(workers) if inference_only_ranks is None else inference_only_ranks
+        self.ranks = [None] * rank_count
+        self.idle = [False] * rank_count
         self.changed = asyncio.Event()
         self.workers = [Worker(self, path) for path in workers]
         self.tasks = []
@@ -259,7 +260,10 @@ class Worker:
 async def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--socket", required=True, type=Path)
-    p.add_argument("--worker", required=True, action="append", type=Path)
+    mode = p.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--worker", action="append", type=Path, default=[])
+    mode.add_argument("--inference-only-ranks", type=int, choices=(4,),
+                      help="TP4 rank fencing with no standalone mining workers")
     p.add_argument("--timeout", type=float, default=5)
     p.add_argument("--watch-workers", action="store_true",
                    help="arm the lifetime watchdog on workers started with --require-watch")
@@ -271,7 +275,10 @@ async def main():
         p.error("use distinct worker endpoints and a positive timeout")
     if args.socket.exists() or args.socket.is_symlink():
         p.error("broker socket path is already in use")
-    fleet = Fleet(args.worker, args.timeout, watch_workers=args.watch_workers)
+    if args.inference_only_ranks and args.watch_workers:
+        p.error("--watch-workers needs standalone workers")
+    fleet = Fleet(args.worker, args.timeout, watch_workers=args.watch_workers,
+                  inference_only_ranks=args.inference_only_ranks)
     stop = asyncio.Event()
     for sig in (signal.SIGTERM, signal.SIGINT):
         asyncio.get_running_loop().add_signal_handler(sig, stop.set)
