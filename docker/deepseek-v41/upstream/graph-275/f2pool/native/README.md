@@ -48,13 +48,13 @@ During qualification F2Pool acknowledged all **257** direct submissions, with 68
 
 ## Production operation
 
-The enabled user unit `dsv41-pearl.service` runs the existing checkpoint on `127.0.0.1:8000` with the original loopback authentication behavior, four startup smokes, content-free serving diagnostics and an independent CPU inference gateway. A per-run owner-only directory under `native-production/runs` holds the gateway credential, pool receipts and native rank counters. `native-production/current` identifies the current run. The thermal cutoff is 92°C on any card. The service's failure handler starts the original Docker deployment. A deliberate rollback uses `systemctl --user start dsv41-pearl-fallback.service`; systemd orders model shutdown before the stock instance starts. `systemctl --user start dsv41-pearl.service` reactivates the native deployment.
+The enabled user unit `dsv41-pearl.service` runs the existing checkpoint on `127.0.0.1:8000` with the original loopback authentication behavior, four startup smokes and content-free serving diagnostics. Each owner-only session under `native-production/runs` holds its native rank counters. Joined sessions also run the CPU inference gateway and keep its credential and receipts in that session. `native-production/current` identifies the current run. The thermal cutoff is 92°C on any card. The service's failure handler starts the original Docker deployment. A deliberate rollback uses `systemctl --user start dsv41-pearl-fallback.service`; systemd orders model shutdown before the stock instance starts. `systemctl --user start dsv41-pearl.service` reactivates the native deployment.
 
 The serving source starts at official SGLang `c64f2256d583` (2026-11-23 16:00:36 Pacific) plus the SM120 reconstruction. The incremental source bundles in this directory apply to the pinned graph SGLang and K780 parents. Use the [graph restoration instructions](../../README.md) for those bases. [Pinned graph inputs](../../build-lock.json)
 
 | Component | Parent | Native commit |
 |---|---|---|
-| SGLang | `a384e33a52d7` | `8d301c518b1a` |
+| SGLang | `a384e33a52d7` | `f657eb5ddf4e` |
 | K780 Rust/CUDA miner | `c9bc83799ed2` | `cb4bcdd4cf34` |
 
 The following commands rebuild the native library in disposable checkouts on the prepared host. The installed source checkouts supply the bundle parents. The miner checkout also needs its pinned Pearl and CUTLASS submodules.

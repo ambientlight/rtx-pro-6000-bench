@@ -65,10 +65,12 @@ def owners(directory=RUN, *, joined=True):
         data[rank] = dict(pid=pid, context_matches=rec["thread_context"] == rec["borrowed_context"],
                           scheduler_receipt=(directory/"serving/shapes"/f"pearl-shapes-{pid}-tp{rank}.json").exists())
         if not joined:
-            with Path(f"/proc/{pid}/maps").open() as maps:
-                libs = {Path(line.split()[-1]).name for line in maps if "/libpearl_" in line}
-            if "libpearl_idle.so" not in libs or libs & {"libpearl_wo_b.so", "libpearl_prepare.so", "libpearl_reference.so"}:
-                raise RuntimeError(f"Unexpected Pearl libraries in non-joined scheduler {rank}")
+            startup = json.loads((directory/"logs"/f"native-{rank}-{pid}.startup.json").read_text())
+            libs = set(startup["pearl_libraries"])
+            if ((startup["rank"],startup["pid"],startup["observe"],startup["graph_verify"],startup["operator"])
+                    != (rank,pid,False,False,None) or "libpearl_idle.so" not in libs
+                    or libs & {"libpearl_wo_b.so", "libpearl_prepare.so", "libpearl_reference.so"}):
+                raise RuntimeError(f"Unexpected inference hooks or Pearl libraries in scheduler {rank}")
             data[rank]["loaded_pearl_libraries"] = sorted(libs)
     raw=subprocess.check_output(["nvidia-smi","--query-compute-apps=pid,process_name,gpu_uuid",
                                  "--format=csv,noheader"],text=True)
