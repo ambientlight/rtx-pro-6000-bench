@@ -5,6 +5,7 @@ These scripts reproduce the single-GPU kernel, HTTP and serving-contract checks 
 | Source | Verification |
 |---|---|
 | `pearl-upstream-native/`, `pearl_sgl_gpuenv` | Synthetic HTTP requests, warm-worker broker, handoff observations and local proof-server startup. The maintained fixture builder generates the small Llama and DeepSeek checkpoint variants. [Checkpoint builder](../../../make_smoke_model.py) · [Proof HTTP client](../../../check_http_projection.py) |
+| [check-profile-env](../profile-checks/check-profile-env), [check-pearl-profile](../profile-checks/check-pearl-profile) | Four-rank environment wrappers used to check the native and Pearl serving profiles before loading the full model. [Profile check](../../../check_profile.py) |
 | `sgl-serving-oci-gpu0/` | Runs the attention-page and host Engram fixtures from the reconstructed checkout and records the actual loaded libraries. |
 | `sgl-serving-final-qual.py`, `sgl-serving-test-env.sh`, `sgl-native-overt.py` | Runs the offline API contract tests with the checkpoint tokenizer and probes tool-parser behavior. |
 | `deployed-anthropic-fixture.patch` | Adapts the previously deployed Anthropic test mocks to the new chat handler. It retains the wire serialization assertions and drops an identity assertion on the internal `strict` object. |
