@@ -7,7 +7,7 @@ import sys
 import time
 
 from native_clock_bench import benchmark
-from native_clock_compare import compare
+from native_clock_compare import compare, write_table
 from native_check import rows
 from native_report import quantiles
 from native_service import RELEASE
@@ -70,6 +70,7 @@ def run(baseline, directory):
     data["cold_broker_demand_to_clock_socket_release_ms"] = quantiles(delays)
     data["post_trial_memory_mhz"] = clocks
     write(directory/"comparison.json", data)
+    write_table(directory/"comparison.csv", data)
     print(f"Finished {data['pairs']} request pairs. Idle mining change {data['mining_change_pct']:+.2f}%.",flush=True)
 
 

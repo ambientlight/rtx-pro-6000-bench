@@ -139,6 +139,8 @@ The superseded system-level `pearl-f2pool.service` was stopped but enabled at ac
 
 The clock controller observes the live native broker's idle permit. Five continuous idle seconds open a local socket that holds the four GPUs at 7,001 MHz. A new inference claim closes the socket and requests automatic memory clocks while the miner drains. Mining resumes as soon as the broker grants the next idle permit. The controller runs as the serving user. Systemd executes two fixed NVIDIA commands for the four named GPU UUIDs. Closing the connection or losing the controller triggers the reset. [Controller](clock/watch_clock.py) · [Clock service](clock/dsv41-memory-clock@.service)
 
+After 20 seconds of holding a mining lease, the controller reads all four memory clocks in the background. If any card still reports more than 7,001 MHz, the controller releases the lease and retries once after five more idle seconds. New demand cancels the retry. The controller records the readback and the retry in its journal.
+
 As `ambientlight` on `htower`, install the root-owned socket once. Opening the listener leaves the current clock policy in effect until the first mining lease.
 
 ```sh

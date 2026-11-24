@@ -10,12 +10,15 @@ import signal
 import socket
 import stat
 import struct
+import subprocess
+import threading
 import time
 
 
 PERMIT = struct.Struct("<QQ")
 PEERCRED = struct.Struct("3i")
 LEASE = Path("/run/dsv41-memory-clock.sock")
+READBACK = struct.Struct("<Q4I")
 
 
 def emit(event, **fields):
@@ -59,7 +62,17 @@ def read_epoch(fd, pid):
     return epoch
 
 
-def follow(directory, lease_path, grace):
+def memory_clocks():
+    output = subprocess.check_output(
+        ["/usr/bin/nvidia-smi", "--query-gpu=clocks.mem", "--format=csv,noheader,nounits"],
+        text=True, timeout=3, stderr=subprocess.DEVNULL)
+    clocks = tuple(map(int, output.split()))
+    if len(clocks) != 4:
+        raise ValueError("Expected four memory clock readings")
+    return clocks
+
+
+def follow(directory, lease_path, grace, *, verify_after=20, read_clocks=memory_clocks):
     pid = broker_pid(directory)
     with ExitStack() as resources:
         def managed(fd):
@@ -70,18 +83,38 @@ def follow(directory, lease_path, grace):
         changes = managed(watch_changes(permit))
         owner = managed(os.pidfd_open(pid))
         select = resources.enter_context(selectors.DefaultSelector())
+        received, sender = socket.socketpair(socket.AF_UNIX, socket.SOCK_DGRAM)
+        resources.enter_context(received)
+        resources.enter_context(sender)
+        sender.setblocking(False)
         select.register(owner, selectors.EVENT_READ, "broker")
         select.register(changes, selectors.EVENT_READ, "permit")
+        select.register(received, selectors.EVENT_READ, "readback")
         epoch = None
         deadline = None
         lease = None
+        check = None
+        retried_epoch = None
+        generation = 0
+
+        def verify(expected_generation):
+            # Driver calls must never hold up a demand notification in the broker observer.
+            try:
+                clocks = read_clocks()
+                sender.send(READBACK.pack(expected_generation, *clocks))
+            except (OSError, ValueError, subprocess.SubprocessError) as error:
+                if sender.fileno() >= 0:
+                    emit("clock_readback_error", reason=type(error).__name__)
 
         def release():
-            nonlocal lease
+            nonlocal lease, check
             if lease is not None:
                 select.unregister(lease)
                 lease.close()
                 lease = None
+                if check is not None:
+                    check.cancel()
+                    check = None
                 emit("automatic_requested", epoch=epoch)
 
         resources.callback(release)
@@ -107,6 +140,10 @@ def follow(directory, lease_path, grace):
                     select.register(lease, selectors.EVENT_READ, "lease")
                     deadline = None
                     emit("mining_clock_requested", epoch=epoch)
+                    generation += 1
+                    check = threading.Timer(verify_after, verify, args=(generation,))
+                    check.daemon = True
+                    check.start()
             timeout = None if deadline is None else max(0, deadline - time.monotonic())
             for key, _ in select.select(timeout):
                 if key.data == "broker":
@@ -117,6 +154,16 @@ def follow(directory, lease_path, grace):
                     # A failed or stopped privileged service closes its end. Recheck the broker.
                     release()
                     deadline = time.monotonic() + grace if epoch % 2 else None
+                elif key.data == "readback":
+                    checked, *clocks = READBACK.unpack(received.recv(READBACK.size))
+                    if lease is None or generation != checked or read_epoch(permit, pid) != epoch:
+                        continue
+                    emit("mining_clock_readback", epoch=epoch, memory_mhz=clocks)
+                    if any(mhz > 7001 for mhz in clocks) and retried_epoch != epoch:
+                        retried_epoch = epoch
+                        emit("retry_mining_clock", epoch=epoch)
+                        release()
+                        deadline = time.monotonic() + grace
 
 
 def main():
