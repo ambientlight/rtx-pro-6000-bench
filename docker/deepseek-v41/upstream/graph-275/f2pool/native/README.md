@@ -1,10 +1,14 @@
 # DeepSeek TP4 with Pearl inside SGLang
 
-The four SM120 schedulers own the four CUDA contexts. Each scheduler loads the K780 Rust library and gives its mining thread the scheduler's existing context. Each idle thread runs one CUDA graph at a time on a low-priority stream. The 12,032-tile default covers a 26,112-tile nonce in three graphs, two of 12,032 tiles and one of 2,048. When inference arrives, the CPU broker stops new mining slices and waits for the outstanding graph on each GPU. After the last inference batch, all four ranks fence their streams and reopen the gate.
+The four SM120 schedulers own the four CUDA contexts. Each scheduler loads the native Pearl library and gives its mining thread the scheduler's existing context. Each idle thread runs one CUDA graph at a time on a low-priority stream. The 12,032-tile default covers a 26,112-tile nonce in three graphs, two of 12,032 tiles and one of 2,048. When inference arrives, the CPU broker stops new mining slices and waits for the outstanding graph on each GPU. After the last inference batch, all four ranks fence their streams and reopen the gate.
 
 In `joined` mode, layer zero's `attn.wo_b` computes both the projection consumed by DeepSeek and Pearl transcripts. This code runs inside the full DSPARK decode graph and eligible prefill calls. Direct and inference work have separate F2Pool connections. An independent local verifier checks a winning inference witness before forwarding it. That witness contains small numerical samples from the request. The owner enabled these submissions for the production endpoint.
 
-In `non-joined` mode, prefill and decode use the checkpoint's original projection. Only the resident idle K780 threads perform mining. Both modes use the same scheduler admission, CUDA contexts, short idle graphs and post-inference release. Select the mode before starting the service so SGLang captures the corresponding inference graphs. On existing installations without a selection, startup uses `joined`.
+In `non-joined` mode, prefill and decode use the checkpoint's original projection. The resident threads mine when inference is idle. Both modes use the same scheduler admission, CUDA contexts, short idle graphs and post-inference release. Select the mode before starting the service so SGLang captures the corresponding inference graphs. On existing installations without a selection, startup uses `joined`.
+
+As of November 25, `htower` serves in non-joined mode with the 160 × 256 K781 idle kernel. All four existing workers submitted accepted variant 780 proofs to F2Pool. Two 90-second K781 windows measured 1,236.5 and 1,239.1 TMAC/s, compared with 1,242.2 TMAC/s just before the restart. [K781 production activation](k781-production-275w.json)
+
+Three uncached public prompts ran once on K780 and three times on K781 after idle mining. Each produced 256 tokens. Median client decode was 112.86 and 112.82 tokens/s respectively. Median server prefill fell from 7,776 to 6,259 tokens/s. On K781 the same prompts measured 5,879 prefill tokens/s with mining parked and all four memory clocks at 13,365 MHz. The cause of the prefill difference remains open. [Responses measurements and handoff timings](k781-production-275w.json)
 
 ```sh
 runtime=/mnt/hot/ambientlight/sglang-sm120-runtime
@@ -116,7 +120,7 @@ The serving source starts at official SGLang `c64f2256d583` (2026-11-23 16:00:36
 | SGLang | `a384e33a52d7` | `f657eb5ddf4e` |
 | K780 Rust/CUDA miner | `c9bc83799ed2` | `cb4bcdd4cf34` |
 
-The following commands rebuild the native library in disposable checkouts on the prepared host. The installed source checkouts supply the bundle parents. The miner checkout also needs its pinned Pearl and CUTLASS submodules.
+The following commands rebuild the original K780 qualification library in disposable checkouts on the prepared host. The installed source checkouts supply the bundle parents. The miner checkout also needs its pinned Pearl and CUTLASS submodules. To build the K781 profile, use the `native-miner` branch `sm120/sglang-native-idle` with the native shutdown fix `ecb40d7` and set `BPM_SLICE_PROFILE=k781` for the release build.
 
 ```sh
 runtime=/mnt/hot/ambientlight/sglang-sm120-runtime
