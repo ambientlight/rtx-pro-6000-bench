@@ -6,7 +6,9 @@ In `joined` mode, layer zero's `attn.wo_b` computes both the projection consumed
 
 In `non-joined` mode, prefill and decode use the checkpoint's original projection. The resident threads mine when inference is idle. Both modes use the same scheduler admission, CUDA contexts, short idle graphs and post-inference release. Select the mode before starting the service so SGLang captures the corresponding inference graphs. On existing installations without a selection, startup uses `joined`.
 
-As of November 25, `htower` serves in non-joined mode with the 160 × 256 K781 idle kernel. All four existing workers submitted accepted variant 780 proofs to F2Pool. Two 90-second K781 windows measured 1,236.5 and 1,239.1 TMAC/s, compared with 1,242.2 TMAC/s just before the restart. [K781 production activation](k781-production-275w.json)
+`htower` serves DeepSeek in non-joined mode with the **K782** idle kernel, 12,032 tiles per slice and adaptive memory clocks. On November 25, all four original workers resumed F2Pool mining after three direct Responses requests and received 44 acknowledgements with zero rejects. A 90-second idle window averaged 1,242.01 TMAC/s at 275 W per GPU. The final K781 window averaged 1,240.74 TMAC/s, and the last 20 K781 windows ranged from 1,240.67 to 1,242.70. The K782 requests had a median server prefill rate of 7,664 tokens/s and client decode rate of 120.39 tokens/s for about 1,350 input and 256 output tokens. [K782 production activation and measurements](k782-production-275w.json)
+
+At the earlier K781 activation, all four workers submitted accepted variant 780 proofs to F2Pool. Two 90-second K781 windows measured 1,236.5 and 1,239.1 TMAC/s, compared with 1,242.2 TMAC/s just before that restart. [K781 production activation](k781-production-275w.json)
 
 Three uncached public prompts ran once on K780 and three times on K781 after idle mining. Each produced 256 tokens. Median client decode was 112.86 and 112.82 tokens/s respectively. Median server prefill fell from 7,776 to 6,259 tokens/s. On K781 the same prompts measured 5,879 prefill tokens/s with mining parked and all four memory clocks at 13,365 MHz. The cause of the prefill difference remains open. [Responses measurements and handoff timings](k781-production-275w.json)
 
@@ -120,7 +122,7 @@ The serving source starts at official SGLang `c64f2256d583` (2026-11-23 16:00:36
 | SGLang | `a384e33a52d7` | `f657eb5ddf4e` |
 | K780 Rust/CUDA miner | `c9bc83799ed2` | `cb4bcdd4cf34` |
 
-The following commands rebuild the original K780 qualification library in disposable checkouts on the prepared host. The installed source checkouts supply the bundle parents. The miner checkout also needs its pinned Pearl and CUTLASS submodules. To build the K781 profile, use the `native-miner` branch `sm120/sglang-native-idle` with the native shutdown fix `ecb40d7` and set `BPM_SLICE_PROFILE=k781` for the release build.
+The following commands rebuild the original K780 qualification library in disposable checkouts on the prepared host. The installed source checkouts supply the bundle parents. The miner checkout also needs its pinned Pearl and CUTLASS submodules. To build K782, use the `native-miner` branch `sm120/sglang-native-idle` at `60b6b76` and set `BPM_SLICE_PROFILE=k782` for the release build. On this host, set `CUOBJDUMP="$runtime/base-unpacked/rootfs/usr/local/cuda-13.0/bin/cuobjdump"` alongside the CUDA 13.4 compiler. For the earlier K781 profile, use `BPM_SLICE_PROFILE=k781` with the native shutdown fix `ecb40d7`.
 
 ```sh
 runtime=/mnt/hot/ambientlight/sglang-sm120-runtime
