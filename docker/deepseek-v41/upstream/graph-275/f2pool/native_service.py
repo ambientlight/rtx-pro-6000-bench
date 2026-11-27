@@ -81,6 +81,8 @@ def fresh_session(control, mode):
         (run / "serving/shapes").mkdir()
         (run / "receipts").mkdir()
         (run / "gateway-token").write_text(secrets.token_hex(32))
+    # Older staging manifests set a cutoff for the in-process miner.
+    config.pop("cutoff_c", None)
     config.update(permit=str(control / "idle.permit"), log_dir=str(run / "logs"))
     save(run / "config.json", config)
     tmp = RELEASE / "next"
@@ -169,8 +171,7 @@ def serve():
     children = {}
     try:
         host.check_artifacts()
-        if max(host.cards()) >= host.GPU_TEMP_CUTOFF_C:
-            raise RuntimeError("Temperature reached the 92 C cutoff before startup")
+        host.cards()  # Verify the four boards and their power limits before cutover.
         exclusive_devices()
         sock = control / "broker.sock"
         token = run / "gateway-token"
@@ -191,8 +192,6 @@ def serve():
                 raise RuntimeError("A serving child exited: " + ",".join(k for k,p in children.items() if p.poll() is not None))
             temps = host.cards()
             save(run / "temperature.json", dict(time_ns=time.time_ns(), temperatures_c=temps))
-            if max(temps) >= host.GPU_TEMP_CUTOFF_C:
-                raise RuntimeError("GPU reached the 92 C cutoff")
             if "model" not in children and sock.exists() and (not joined or receipt.exists()):
                 if joined:
                     arm.touch(mode=0o600, exist_ok=False)
@@ -220,48 +219,25 @@ def serve():
         stop_children(children)
 
 
-def fallback():
-    # systemd orders this after the native unit and drains its cgroup first.
-    started_ns = time.time_ns()
-    if (RELEASE / "current").exists():
-        save(RELEASE / "current/fallback.json", dict(start_ns=started_ns))
-    was_running = stock_status() == "running"
-    if not was_running:
-        try:
-            host.run(*host.DOCKER, "start", "dsv41", timeout=120)
-        except subprocess.CalledProcessError:
-            # The restricted Docker helper may decline a concurrent second start.
-            if stock_status() != "running":
-                raise
-    deadline = time.monotonic() + 15 * 60
-    while time.monotonic() < deadline:
-        smokes = [host.ORIGINAL / name for name in host.SMOKES]
-        if (stock_available() and stock_status() == "running" and
-                all(p.is_file() and (was_running or p.stat().st_mtime_ns >= started_ns) for p in smokes)):
-            if (RELEASE / "current").exists():
-                save(RELEASE / "current/fallback.json", dict(start_ns=started_ns, verified_ns=time.time_ns()))
-            return
-        time.sleep(2)
-    raise TimeoutError("Stock model failed to return on port 8000")
-
-
 def install():
     directory = Path.home() / ".config/systemd/user"
     clock_assets = HERE.parent / "native/clock"
     clock_unit = clock_assets / "dsv41-adaptive-clock.service"
     controller = Path.home() / ".local/libexec/dsv41-watch-clock.py"
-    units = {UNIT: f"""[Unit]
+    unit = f"""[Unit]
 Description=DeepSeek TP4 with native Pearl mining
-OnFailure={UNIT}-fallback.service
 
 [Service]
 Type=notify
 ExecStart={host.PYTHON} {HERE} serve
+Restart=on-failure
+RestartSec=10s
 RuntimeDirectory={UNIT}
 RuntimeDirectoryMode=0700
 UMask=0077
-MemoryMax=365G
-MemorySwapMax=0
+MemoryHigh=infinity
+MemoryMax=infinity
+MemorySwapMax=infinity
 LimitCORE=0
 KillMode=mixed
 TimeoutStartSec=18min
@@ -269,20 +245,10 @@ TimeoutStopSec=160
 
 [Install]
 WantedBy=default.target
-""", UNIT + "-fallback": f"""[Unit]
-Description=Restore stock DeepSeek after native Pearl stops
-Conflicts={UNIT}.service
-After={UNIT}.service
-
-[Service]
-Type=oneshot
-ExecStart={host.PYTHON} {HERE} fallback
-UMask=0077
-TimeoutStartSec=18min
-"""}
+"""
     files = [(controller, (clock_assets / "watch_clock.py").read_text(), 0o755),
-             (directory / clock_unit.name, clock_unit.read_text(), 0o644)]
-    files.extend((directory / (name + ".service"), body, 0o644) for name, body in units.items())
+             (directory / clock_unit.name, clock_unit.read_text(), 0o644),
+             (directory / (UNIT + ".service"), unit, 0o644)]
     for dst, body, mode in files:
         dst.parent.mkdir(parents=True, exist_ok=True)
         with tempfile.TemporaryDirectory(dir=dst.parent) as staging:
@@ -290,6 +256,10 @@ TimeoutStartSec=18min
             tmp.write_text(body)
             tmp.chmod(mode)
             tmp.replace(dst)
+    legacy = directory / (UNIT + "-fallback.service")
+    if legacy.exists():
+        host.run("systemctl", "--user", "stop", legacy.name)
+        legacy.unlink()
     host.run("systemctl", "--user", "daemon-reload")
     host.run("systemctl", "--user", "enable", UNIT + ".service", clock_unit.name)
 
@@ -297,11 +267,11 @@ TimeoutStartSec=18min
 if __name__ == "__main__":
     cli = argparse.ArgumentParser(description=__doc__)
     commands = cli.add_subparsers(dest="command", required=True)
-    for name in ("serve", "fallback", "install"):
+    for name in ("serve", "install"):
         commands.add_parser(name)
     commands.add_parser("set-mode", help="Select the mode for the next service start").add_argument("mode", choices=MODES)
     args = cli.parse_args()
     if args.command == "set-mode":
         set_mode(args.mode)
     else:
-        {"serve": serve, "fallback": fallback, "install": install}[args.command]()
+        {"serve": serve, "install": install}[args.command]()

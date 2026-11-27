@@ -51,7 +51,7 @@ def prepare(source, library, *, slice_tiles=DEFAULT_SLICE_TILES):
     with cfg.open("x") as out:
         json.dump(dict(library=str(run/"libpearl_idle.so"),permit=str(host.SOCKET.with_name("idle.permit")),
                        endpoint=f"{HOST}:{PORT}",account=json.loads(secret(PREFLIGHT))["f2pool_mining_account"],
-                       worker_prefix="sglnative",log_dir=str(run/"logs"),tiles=slice_tiles,power_w=275,cutoff_c=host.GPU_TEMP_CUTOFF_C),out)
+                       worker_prefix="sglnative",log_dir=str(run/"logs"),tiles=slice_tiles,power_w=275),out)
     (run/"staged.json").write_text(json.dumps(dict(library_sha256=digest(run/"libpearl_idle.so"),
         source={rel:digest(run/"pkg/sglang"/rel) for rel in FILES}),indent=2)+"\n")
 

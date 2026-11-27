@@ -115,7 +115,9 @@ During qualification F2Pool acknowledged all **257** direct submissions, with 68
 
 ## Production operation
 
-The enabled user unit `dsv41-pearl.service` runs the existing checkpoint on `127.0.0.1:8000` with the original loopback authentication behavior, four startup smokes and content-free serving diagnostics. Each owner-only session under `native-production/runs` holds its native rank counters. Joined sessions also run the CPU inference gateway and keep its credential and receipts in that session. `native-production/current` identifies the current run. The thermal cutoff is 92°C on any card. The service's failure handler starts the original Docker deployment. A deliberate rollback uses `systemctl --user start dsv41-pearl-fallback.service`; systemd orders model shutdown before the stock instance starts. `systemctl --user start dsv41-pearl.service` reactivates the native deployment.
+The enabled user unit `dsv41-pearl.service` runs the existing checkpoint on `127.0.0.1:8000` with the original loopback authentication behavior, four startup smokes and content-free serving diagnostics. Each owner-only session under `native-production/runs` holds its native rank counters. Joined sessions also run the CPU inference gateway and keep its credential and receipts in that session. `native-production/current` identifies the current run.
+
+NVIDIA handles GPU thermal throttling. The supervisor records each card's temperature in `temperature.json`, and each embedded worker reports `"cutoff_c": null` at startup. The service can use all host RAM and swap available to its cgroup. If the service fails, systemd waits ten seconds and retries the same native deployment with its saved serving mode.
 
 The serving source starts at official SGLang `c64f2256d583` (2026-11-23 16:00:36 Pacific) plus the SM120 reconstruction. The incremental source bundles in this directory apply to the pinned graph SGLang and K780 parents. Use the [graph restoration instructions](../../README.md) for those bases. [Pinned graph inputs](../../build-lock.json)
 
@@ -146,10 +148,15 @@ export CARGO_TARGET_DIR="$scratch/target" RUSTC_BOOTSTRAP=1
 (cd "$scratch/miner" && RUSTFLAGS='-C panic=abort' cargo +1.97.0 build --offline --locked --release --lib -j 16)
 ```
 
-The library used in the original joined qualification had SHA-256 `e9ca9d12e105f1e075e45148ab7e84e3b240a20564fd23a00b422a50a611c5fc`. For a fresh production release, use a pinned checkout of the operator repository directly under the runtime directory and run the following. Staging refuses to overwrite a populated production configuration. Existing production installations can be verified directly with `native_live.py`. It sends a small public Responses fixture and waits for a real F2Pool acknowledgement on every GPU.
+The library used in the original joined qualification had SHA-256 `e9ca9d12e105f1e075e45148ab7e84e3b240a20564fd23a00b422a50a611c5fc`. For production K783, build the miner with support for driver-managed temperatures from commit `0069665852b2`. The following commands continue in the prepared build environment above. Staging requires a fresh production configuration. To verify an existing installation, `native_live.py` sends a public Responses fixture and waits for a real F2Pool acknowledgement on every GPU.
 
 ```sh
 code="$runtime/native-production-code/docker/deepseek-v41/upstream/graph-275/f2pool"
+git -C "$scratch/miner" fetch "$runtime/native-miner" sm120/sglang-native-idle
+git -C "$scratch/miner" checkout --detach 0069665852b2
+git -C "$scratch/miner" submodule update --init --recursive
+export BPM_SLICE_PROFILE=k783 CUOBJDUMP="$runtime/base-unpacked/rootfs/usr/local/cuda-13.0/bin/cuobjdump"
+(cd "$scratch/miner" && RUSTFLAGS='-C panic=abort' cargo +1.97.0 build --offline --locked --release --lib -j 16)
 PEARL_NATIVE_IDLE_CONFIG="$runtime/native-production/config.json" python3 "$code/native_host.py" prepare \
     --source "$scratch/sglang" --library "$CARGO_TARGET_DIR/release/libpearl_idle.so"
 python3 "$code/native_service.py" install

@@ -2,7 +2,6 @@ from contextlib import ExitStack
 import io
 import os
 from pathlib import Path
-import subprocess
 import tempfile
 import threading
 import unittest
@@ -22,11 +21,27 @@ class Installation(unittest.TestCase):
             self.assertEqual((units / clock_unit).read_bytes(), (assets / clock_unit).read_bytes())
             controller = Path(tmp) / ".local/libexec/dsv41-watch-clock.py"
             self.assertEqual(controller.read_bytes(), (assets / "watch_clock.py").read_bytes())
-            self.assertTrue((units / "dsv41-pearl-fallback.service").is_file())
+            self.assertFalse((units / "dsv41-pearl-fallback.service").exists())
+            native = (units / "dsv41-pearl.service").read_text().splitlines()
+            self.assertFalse(any(line.startswith("OnFailure=") for line in native))
+            for setting in ("Restart=on-failure", "MemoryHigh=infinity", "MemoryMax=infinity", "MemorySwapMax=infinity"):
+                self.assertIn(setting, native)
             self.assertEqual([c.args for c in run.call_args_list], [
                 ("systemctl", "--user", "daemon-reload"),
                 ("systemctl", "--user", "enable", "dsv41-pearl.service", clock_unit),
             ])
+
+    def test_upgrade_retires_installed_fallback(self):
+        with tempfile.TemporaryDirectory() as tmp, patch.object(service.Path, "home", return_value=Path(tmp)), \
+                patch.object(service.host, "run") as run:
+            legacy = Path(tmp) / ".config/systemd/user/dsv41-pearl-fallback.service"
+            legacy.parent.mkdir(parents=True)
+            legacy.touch()
+            service.install()
+            service.install()
+            self.assertFalse(legacy.exists())
+            stops = [c.args for c in run.call_args_list if "stop" in c.args]
+            self.assertEqual(stops, [("systemctl", "--user", "stop", legacy.name)])
 
 
 class ServingMode(unittest.TestCase):
@@ -56,7 +71,7 @@ class ServingMode(unittest.TestCase):
                 patches.callback(os.umask, old_umask)
                 patches.enter_context(patch.dict(os.environ, {"RUNTIME_DIRECTORY":str(root)}))
                 for target, name, value in ((service,"selected_mode",mode),(service,"fresh_session",run),
-                    (service.host,"cards",[60]*4),(service.threading,"Event",stop),
+                    (service.host,"cards",[92,85,91,86]),(service.threading,"Event",stop),
                     (service.urllib.request,"urlopen",io.BytesIO(b'{"data":[{"id":"deepseek-v4-flash"}]}'))):
                     patches.enter_context(patch.object(target,name,return_value=value))
                 for target,name in ((service.host,"check_artifacts"),(service,"exclusive_devices"),
@@ -68,6 +83,7 @@ class ServingMode(unittest.TestCase):
                 self.assertEqual(started,["broker","gateway","model"] if mode=="joined" else ["broker","model"])
                 ready=service.read(run/"ready.json")
                 self.assertEqual((ready["mode"],ready["inference_proofs_enabled"]),(mode,mode=="joined"))
+                self.assertEqual(service.read(run/"temperature.json")["temperatures_c"], [92,85,91,86])
 
     def test_mode_persists_and_invalid_updates_preserve_selection(self):
         with tempfile.TemporaryDirectory() as tmp, patch.object(service, "RELEASE", Path(tmp)):
@@ -97,13 +113,13 @@ class ServingMode(unittest.TestCase):
             root = Path(tmp)
             lib = root / "libpearl_idle.so"
             lib.touch()
-            service.save(root/"config.json", {"library":str(lib)})
+            service.save(root/"config.json", {"library":str(lib), "cutoff_c":92})
             service.save(root/"staged.json", {"library_sha256":service.digest(lib), "source":{}})
             with patch.object(service, "VERIFIER", root/"unavailable"):
                 run = service.fresh_session(root/"control", "non-joined")
                 with self.assertRaises(FileNotFoundError):
                     service.fresh_session(root/"control", "joined")
-            self.assertTrue((run/"config.json").is_file())
+            self.assertNotIn("cutoff_c", service.read(run/"config.json"))
             self.assertFalse(any((run/p).exists() for p in ("gateway-token","armed","receipts","serving/shapes")))
 
 
@@ -124,22 +140,6 @@ class StockCutover(unittest.TestCase):
              patch.object(service.host, "run", side_effect=["failed", "", ""]):
             service.exclusive_devices()
         drain.assert_called_once_with()
-
-    def test_concurrent_fallback_treats_already_running_container_as_success(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            original = root / "stock"
-            original.mkdir()
-            def race(*args, **kwargs):
-                for name in service.host.SMOKES:
-                    (original/name).touch()
-                raise subprocess.CalledProcessError(1, args)
-            with patch.object(service, "RELEASE", root), patch.object(service.host, "ORIGINAL", original), \
-                 patch.object(service, "stock_status", side_effect=["exited", "running", "running"]), \
-                 patch.object(service, "stock_available", return_value=True), \
-                 patch.object(service.time, "time_ns", return_value=1), patch.object(service.host, "run", side_effect=race):
-                service.fallback()
-
 
 if __name__=="__main__":
     unittest.main()

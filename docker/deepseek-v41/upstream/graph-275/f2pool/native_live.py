@@ -101,7 +101,8 @@ def check(out):
                    run=run.name, serving=profiles, port=8000, endpoint="/v1/responses", public_fixture_42=True,
                    fresh_smokes=list(host.SMOKES), ownership=state, scanned_ticket_delta_by_rank=delta,
                    inference_gateway=gateway, mode=mode, graph_deltas=graphs,
-                   direct_pool=ledger, power_limit_w=275, peak_allowed_c=host.GPU_TEMP_CUTOFF_C, temperatures_c=host.cards(),
+                   direct_pool=ledger, power_limit_w=275, peak_allowed_c=json.loads((run / "config.json").read_text()).get("cutoff_c"),
+                   temperatures_c=host.cards(),
                    stock_container=host.run(*host.DOCKER,"inspect","-f","{{.State.Status}}","dsv41"))
     write(out,receipt)
     return receipt
