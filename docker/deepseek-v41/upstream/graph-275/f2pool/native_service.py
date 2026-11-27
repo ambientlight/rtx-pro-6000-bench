@@ -239,6 +239,7 @@ UMask=0077
 MemoryHigh=infinity
 MemoryMax=infinity
 MemorySwapMax=infinity
+LimitMEMLOCK=infinity
 LimitCORE=0
 KillMode=mixed
 TimeoutStartSec=18min

@@ -24,7 +24,8 @@ class Installation(unittest.TestCase):
             self.assertFalse((units / "dsv41-pearl-fallback.service").exists())
             native = (units / "dsv41-pearl.service").read_text().splitlines()
             self.assertFalse(any(line.startswith("OnFailure=") for line in native))
-            for setting in ("Restart=on-failure", "MemoryHigh=infinity", "MemoryMax=infinity", "MemorySwapMax=infinity"):
+            for setting in ("Restart=on-failure", "MemoryHigh=infinity", "MemoryMax=infinity",
+                            "MemorySwapMax=infinity", "LimitMEMLOCK=infinity"):
                 self.assertIn(setting, native)
             self.assertEqual([c.args for c in run.call_args_list], [
                 ("systemctl", "--user", "daemon-reload"),
