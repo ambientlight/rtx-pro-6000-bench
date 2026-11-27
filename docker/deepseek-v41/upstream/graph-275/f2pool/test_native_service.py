@@ -124,6 +124,12 @@ class ServingMode(unittest.TestCase):
 
 
 class StockCutover(unittest.TestCase):
+    def test_native_service_can_start_after_stock_container_is_removed(self):
+        with patch.object(service.host, "run", return_value="another-dsv41 running"):
+            self.assertEqual(service.stock_status(), "absent")
+        with patch.object(service.host, "run", return_value="other running\ndsv41 exited"):
+            self.assertEqual(service.stock_status(), "exited")
+
     def test_fresh_stock_boot_during_cutover(self):
         with patch.object(service, "stock_status", return_value="running"), \
              patch.object(service, "stock_available", return_value=False), \

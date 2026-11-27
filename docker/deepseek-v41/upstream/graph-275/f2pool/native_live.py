@@ -10,7 +10,7 @@ import fullmodel as host
 from native_bench import measure
 from native_check import logs, owners
 from native_report import live_shares
-from native_service import BASE, RELEASE, UNIT
+from native_service import BASE, RELEASE, UNIT, stock_status
 from throughput import sse, write
 from workload import graph
 
@@ -103,7 +103,7 @@ def check(out):
                    inference_gateway=gateway, mode=mode, graph_deltas=graphs,
                    direct_pool=ledger, power_limit_w=275, peak_allowed_c=json.loads((run / "config.json").read_text()).get("cutoff_c"),
                    temperatures_c=host.cards(),
-                   stock_container=host.run(*host.DOCKER,"inspect","-f","{{.State.Status}}","dsv41"))
+                   stock_container=stock_status())
     write(out,receipt)
     return receipt
 

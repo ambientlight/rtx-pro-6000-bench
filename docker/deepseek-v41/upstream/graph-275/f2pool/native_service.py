@@ -109,7 +109,8 @@ def stock_status():
     deadline = time.monotonic() + 90
     while True:
         try:
-            return host.run(*host.DOCKER, "inspect", "-f", "{{.State.Status}}", "dsv41")
+            rows = host.run(*host.DOCKER, "ps", "--all", "--format", "{{.Names}} {{.State}}")
+            return dict(row.split(maxsplit=1) for row in rows.splitlines()).get("dsv41", "absent")
         except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
             # The user manager can start before Docker and its restricted operator socket.
             if time.monotonic() >= deadline:
